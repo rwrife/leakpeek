@@ -1,0 +1,22 @@
+# Go build artifacts
+/leakpeek
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Coverage
+coverage.txt
+*.cover
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local config / scratch
+*.local
+.env
+rules/*.local.toml

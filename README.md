@@ -19,6 +19,20 @@ You paste stack traces, configs, and logs into ChatGPT all day. Sometimes they c
 
 🚧 Early. See [`PLAN.md`](./PLAN.md) for the roadmap and milestones. v0.1 is regex + entropy, pure Go, single static binary.
 
+**M1 (scaffold) is in:** `leakpeek` builds as a static binary, prints `--version`, and reads your clipboard (or `--stdin`) and echoes it back unchanged. No detection yet — that's M2. CI builds + vets + tests on macOS, Linux, and Windows.
+
+## Build & run (from source)
+
+```bash
+go build -o leakpeek ./cmd/leakpeek
+./leakpeek --version
+cat app.log | ./leakpeek --stdin    # echoes input (M1); will frisk it in M2+
+```
+
+Requires Go 1.23+. Clipboard reads use the native tool for your OS
+(`pbpaste` on macOS; `wl-paste`/`xclip`/`xsel` on Linux; `Get-Clipboard` on
+Windows) and fall back to `--stdin` when none is available.
+
 ## Quick idea of the interface (planned)
 
 ```bash

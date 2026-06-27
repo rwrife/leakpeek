@@ -1,0 +1,15 @@
+Hey, debugging this crash and pasting the env into ChatGPT. Here's the stack:
+
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+OPENAI_API_KEY=sk-proj-abc123DEF456ghi789JKL012mno345PQR
+GITHUB_TOKEN=ghp_1234567890abcdefABCDEF1234567890abcd
+SLACK_BOT_TOKEN=xoxb-EXAMPLEfake-EXAMPLEfake-NOTaRealSlackToken
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U
+
+contact ops at oncall@corp.example.com if the box at 10.0.42.17 is down.
+
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA7Yn3k...redacted-for-fixture...QIDAQAB
+-----END RSA PRIVATE KEY-----
+
+just a normal sentence with no secrets and a version like 1.22.333 that is not an ip.

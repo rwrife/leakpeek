@@ -5,10 +5,11 @@
 ```
 $ leakpeek
 🚫 3 things you'd regret pasting:
-   • aws-access-key   line 4   AKIA…REDACTED
-   • openai-key       line 9   sk-…REDACTED
-   • email            line 12  j…@example.com
-A redacted copy is on your clipboard. You're welcome.
+   TYPE            COUNT  WHERE      PREVIEW
+   aws-access-key      1  line 4:9   AKIA…MPLE
+   openai-key          1  line 9:8   sk…wXyz
+   email               1  line 12:3  j…@example.com
+🚫 3 secrets across pii and secret. Don't paste that.
 ```
 
 ## Why
@@ -21,20 +22,47 @@ You paste stack traces, configs, and logs into ChatGPT all day. Sometimes they c
 
 **M1 (scaffold) is in:** `leakpeek` builds as a static binary, prints `--version`, and reads your clipboard (or `--stdin`) and echoes it back unchanged. CI builds + vets + tests on macOS, Linux, and Windows.
 
-**M2 (detector engine) is in:** the `internal/detect` package now provides the brains — a `Detector` interface (`Name`, `Kind`, `Find`), a Shannon-entropy helper, overlapping-span de-duplication, and the v0.1 core secret pack: AWS access keys, OpenAI `sk-` keys, GitHub PATs, Slack tokens, JWTs, private-key headers, emails, IPv4 addresses, and a generic high-entropy catch-all. Specific detectors win over the catch-all during dedupe. Fixture-based unit tests cover positive and negative cases per detector. Wiring this into the CLI's output (a findings report + exit codes) is M3 — for now the binary still echoes its input.
+**M2 (detector engine) is in:** the `internal/detect` package provides the brains — a `Detector` interface (`Name`, `Kind`, `Find`), a Shannon-entropy helper, overlapping-span de-duplication, and the v0.1 core secret pack: AWS access keys, OpenAI `sk-` keys, GitHub PATs, Slack tokens, JWTs, private-key headers, emails, IPv4 addresses, and a generic high-entropy catch-all. Specific detectors win over the catch-all during dedupe.
+
+**M3 (report + exit codes + `--json`) is in:** leakpeek no longer echoes — it now *scans and reports*. It runs the engine over your clipboard (or `--stdin`), prints a grouped findings table (type, count, line/column, masked preview) with a one-line personality verdict, and exits **3** when it finds something (**0** when clean). `--json` emits a versioned, machine-readable document; `--quiet` stays silent on a clean scan (handy for shell aliases). Previews are masked (`AKIA…MPLE`, `sk-proj…CDEF`, `j…@example.com`, `10.x.x.x`) so the report never re-leaks the secret it just caught. Redaction + clipboard write-back (`--fix`) is M4.
 
 ## Build & run (from source)
 
 ```bash
 go build -o leakpeek ./cmd/leakpeek
 ./leakpeek --version
-cat app.log | ./leakpeek --stdin    # echoes input (M1); report wiring lands in M3
+cat app.log | ./leakpeek --stdin           # scan a pipe, print a report
+cat app.log | ./leakpeek --stdin --json    # machine-readable output
+./leakpeek --stdin --quiet < app.log; echo "exit=$?"   # silent unless it finds something
 ```
 
-Run the detector engine's tests directly:
+Example human report on a dirty input:
+
+```
+🚫 5 things you'd regret pasting:
+   TYPE            COUNT  WHERE      PREVIEW
+   aws-access-key      1  line 1:12  AKIA…MPLE
+   openai-key          1  line 2:9   sk-proj…CDEF
+   email               2  line 3:7   j…@example.com (+1 more)
+   ipv4                1  line 4:9   10.x.x.x
+🚫 5 secrets across network, pii and secret. Don't paste that.
+```
+
+### Exit codes
+
+leakpeek's exit code is part of its contract, so CI jobs and shell aliases can branch on it:
+
+- `0` — clean (no findings)
+- `1` — an error occurred (couldn't read input, etc.)
+- `2` — bad usage (unknown flag)
+- `3` — scan completed and **found** something
+
+Run the tests directly:
 
 ```bash
-go test ./internal/detect/...
+go test ./...                  # everything
+go test ./internal/detect/...  # just the detector engine
+go test ./internal/report/...  # just the reporter
 ```
 
 Requires Go 1.23+. Clipboard reads use the native tool for your OS
@@ -44,10 +72,11 @@ Windows) and fall back to `--stdin` when none is available.
 ## Quick idea of the interface (planned)
 
 ```bash
-leakpeek            # scan clipboard, report findings, non-zero exit on a hit
-leakpeek --fix      # put a redacted copy back on the clipboard
-cat app.log | leakpeek --stdin    # scan a pipe instead
-leakpeek --json     # machine-readable output for scripts
+leakpeek            # scan clipboard, report findings, non-zero exit on a hit  (live)
+cat app.log | leakpeek --stdin    # scan a pipe instead                       (live)
+leakpeek --json     # machine-readable output for scripts                     (live)
+leakpeek --quiet    # only print on a hit                                     (live)
+leakpeek --fix      # put a redacted copy back on the clipboard               (M4)
 ```
 
 ## Not a clipboard manager

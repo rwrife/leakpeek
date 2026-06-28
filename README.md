@@ -19,14 +19,22 @@ You paste stack traces, configs, and logs into ChatGPT all day. Sometimes they c
 
 🚧 Early. See [`PLAN.md`](./PLAN.md) for the roadmap and milestones. v0.1 is regex + entropy, pure Go, single static binary.
 
-**M1 (scaffold) is in:** `leakpeek` builds as a static binary, prints `--version`, and reads your clipboard (or `--stdin`) and echoes it back unchanged. No detection yet — that's M2. CI builds + vets + tests on macOS, Linux, and Windows.
+**M1 (scaffold) is in:** `leakpeek` builds as a static binary, prints `--version`, and reads your clipboard (or `--stdin`) and echoes it back unchanged. CI builds + vets + tests on macOS, Linux, and Windows.
+
+**M2 (detector engine) is in:** the `internal/detect` package now provides the brains — a `Detector` interface (`Name`, `Kind`, `Find`), a Shannon-entropy helper, overlapping-span de-duplication, and the v0.1 core secret pack: AWS access keys, OpenAI `sk-` keys, GitHub PATs, Slack tokens, JWTs, private-key headers, emails, IPv4 addresses, and a generic high-entropy catch-all. Specific detectors win over the catch-all during dedupe. Fixture-based unit tests cover positive and negative cases per detector. Wiring this into the CLI's output (a findings report + exit codes) is M3 — for now the binary still echoes its input.
 
 ## Build & run (from source)
 
 ```bash
 go build -o leakpeek ./cmd/leakpeek
 ./leakpeek --version
-cat app.log | ./leakpeek --stdin    # echoes input (M1); will frisk it in M2+
+cat app.log | ./leakpeek --stdin    # echoes input (M1); report wiring lands in M3
+```
+
+Run the detector engine's tests directly:
+
+```bash
+go test ./internal/detect/...
 ```
 
 Requires Go 1.23+. Clipboard reads use the native tool for your OS

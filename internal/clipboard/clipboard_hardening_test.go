@@ -90,13 +90,23 @@ func TestReadWriteErrorAllFailedDoesNotWrapSentinel(t *testing.T) {
 	}
 }
 
-// --- Cascade integration tests via fake tools on PATH (POSIX only) ---
+// --- Cascade integration tests via fake tools on PATH (Linux only) ---
 //
 // These build tiny shell-script stand-ins for the Linux clipboard tools so we
 // can drive Read/Write's fall-through logic deterministically without a real
-// display server. They only run where /bin/sh + chmod behave (i.e. not on
-// Windows CI), and they exercise the linux candidate order (wl-paste → xclip
-// → xsel).
+// display server. They exercise the linux candidate order
+// (wl-paste → xclip → xsel), so they're gated to linux: on macOS/Windows the
+// per-OS candidate list is pbpaste/pbcopy or PowerShell/clip, which would
+// ignore these fakes and hit the real (or absent) system clipboard instead.
+
+// requireLinuxFakeTools skips a cascade test anywhere the Linux adapter chain
+// isn't what Read/Write will actually consult.
+func requireLinuxFakeTools(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("linux-adapter cascade test; GOOS=%s uses a different tool chain", runtime.GOOS)
+	}
+}
 
 // writeFakeTool creates an executable script named `name` in dir that runs
 // `body` (a /bin/sh snippet). It returns nothing; failures fail the test.
@@ -119,9 +129,7 @@ func fakeToolPATH(t *testing.T, dir string) {
 }
 
 func TestReadCascadesPastFailingTool(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake POSIX tools; not applicable on windows")
-	}
+	requireLinuxFakeTools(t)
 	dir := t.TempDir()
 	// wl-paste is installed but "fails" (simulating no Wayland display);
 	// xclip is installed and succeeds. Read must fall through to xclip.
@@ -139,9 +147,7 @@ func TestReadCascadesPastFailingTool(t *testing.T) {
 }
 
 func TestReadEmptyWaylandClipboardIsEmptyNotError(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake POSIX tools; not applicable on windows")
-	}
+	requireLinuxFakeTools(t)
 	dir := t.TempDir()
 	// wl-paste reports the documented "empty clipboard" condition: it should
 	// read as "" with no error, and must NOT fall through to xclip.
@@ -159,9 +165,7 @@ func TestReadEmptyWaylandClipboardIsEmptyNotError(t *testing.T) {
 }
 
 func TestReadAllToolsFailAggregatesError(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake POSIX tools; not applicable on windows")
-	}
+	requireLinuxFakeTools(t)
 	dir := t.TempDir()
 	writeFakeTool(t, dir, "wl-paste", `echo "wl broke" 1>&2; exit 1`)
 	writeFakeTool(t, dir, "xclip", `echo "xclip broke" 1>&2; exit 1`)
@@ -183,9 +187,7 @@ func TestReadAllToolsFailAggregatesError(t *testing.T) {
 }
 
 func TestWriteCascadesPastFailingTool(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake POSIX tools; not applicable on windows")
-	}
+	requireLinuxFakeTools(t)
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "written.txt")
 	// wl-copy fails; xclip succeeds and records that it ran. Write must

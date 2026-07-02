@@ -34,6 +34,8 @@ You paste stack traces, configs, and logs into ChatGPT all day. Sometimes they c
 
 The guarantee: for every strategy and every detector, the redacted output contains **no original secret material** (verified per-detector in the test suite). On a clean scan, `--fix` leaves the clipboard untouched and passes piped input through byte-for-byte.
 
+**M5 (cross-platform clipboard hardening) is in:** the clipboard layer now degrades gracefully everywhere a paste happens. Each OS has an ordered list of adapters, and leakpeek walks it — skipping tools that aren't installed **and falling through to the next tool when one is installed but fails at runtime**. So a Linux box with `wl-clipboard` installed but no Wayland compositor running still succeeds via `xclip`/`xsel`; an *empty* Wayland clipboard (where `wl-paste` exits non-zero) reads as empty text instead of an error. When nothing on the host can serve the request you get one clear, friendly message: if no tool is installed it wraps a recognizable sentinel and points you at `--stdin`; if tools were present but all failed it lists each tool and why it broke. See the [platform support matrix](#platform-support) below.
+
 ## Build & run (from source)
 
 ```bash
@@ -88,6 +90,45 @@ go test ./internal/report/...  # just the reporter
 Requires Go 1.23+. Clipboard reads use the native tool for your OS
 (`pbpaste` on macOS; `wl-paste`/`xclip`/`xsel` on Linux; `Get-Clipboard` on
 Windows) and fall back to `--stdin` when none is available.
+
+## Install
+
+Until tagged binaries ship (M6), install from source with Go 1.23+:
+
+```bash
+go install github.com/rwrife/leakpeek/cmd/leakpeek@latest
+```
+
+That drops a `leakpeek` binary in `$(go env GOPATH)/bin` (add it to your
+`PATH`). Or clone and build:
+
+```bash
+git clone https://github.com/rwrife/leakpeek && cd leakpeek
+go build -o leakpeek ./cmd/leakpeek
+```
+
+leakpeek shells out to your OS's native clipboard tool. The binary itself has
+no runtime dependencies, but for clipboard read/write (as opposed to
+`--stdin`) you'll want one of the platform tools below installed.
+
+### Platform support
+
+| OS | Read | Write | Install the tool |
+| --- | --- | --- | --- |
+| **macOS** | `pbpaste` | `pbcopy` | built in — nothing to install |
+| **Linux (Wayland)** | `wl-paste` | `wl-copy` | `sudo apt install wl-clipboard` (or your distro's package) |
+| **Linux (X11)** | `xclip` → `xsel` | `xclip` → `xsel` | `sudo apt install xclip` **or** `sudo apt install xsel` |
+| **Windows** | PowerShell `Get-Clipboard` | `clip` | built in — nothing to install |
+| **any / headless** | `--stdin` | `--fix` → stdout | no tool needed; pipe text in and out |
+
+On Linux, leakpeek tries the Wayland tool first, then the X11 tools in order,
+and uses the first that actually works — so a mixed or headless session
+degrades cleanly. If none is installed, pipe instead:
+
+```bash
+pbpaste | leakpeek --stdin            # or wl-paste / xclip -o, etc.
+cat secrets.env | leakpeek --fix > clean.env
+```
 
 ## Quick idea of the interface (planned)
 

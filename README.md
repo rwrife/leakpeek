@@ -34,6 +34,8 @@ You paste stack traces, configs, and logs into ChatGPT all day. Sometimes they c
 
 The guarantee: for every strategy and every detector, the redacted output contains **no original secret material** (verified per-detector in the test suite). On a clean scan, `--fix` leaves the clipboard untouched and passes piped input through byte-for-byte.
 
+**M6 (custom rules) is landing:** you can now teach leakpeek your own secrets. `--rules <path>` loads extra detectors from a TOML rule file — or a whole directory of `*.toml` files — and runs them **alongside** the built-in pack. A rule is the same `{name, kind, regex}` triple a built-in is, so custom detectors report, group, and redact exactly like the core ones, and built-ins keep priority during de-duplication. This is the extensibility hook from PLAN.md §6; goreleaser cross-builds and a tagged `v0.1.0` release round out M6 next.
+
 **M5 (cross-platform clipboard hardening) is in:** the clipboard layer now degrades gracefully everywhere a paste happens. Each OS has an ordered list of adapters, and leakpeek walks it — skipping tools that aren't installed **and falling through to the next tool when one is installed but fails at runtime**. So a Linux box with `wl-clipboard` installed but no Wayland compositor running still succeeds via `xclip`/`xsel`; an *empty* Wayland clipboard (where `wl-paste` exits non-zero) reads as empty text instead of an error. When nothing on the host can serve the request you get one clear, friendly message: if no tool is installed it wraps a recognizable sentinel and points you at `--stdin`; if tools were present but all failed it lists each tool and why it broke. See the [platform support matrix](#platform-support) below.
 
 ## Build & run (from source)
@@ -130,6 +132,49 @@ pbpaste | leakpeek --stdin            # or wl-paste / xclip -o, etc.
 cat secrets.env | leakpeek --fix > clean.env
 ```
 
+## Custom rules
+
+The built-in pack covers the usual suspects, but your secrets are yours: an
+internal hostname scheme, an employee-ID format, a bespoke token prefix. Point
+`--rules` at a TOML file (or a directory of `*.toml` files) and leakpeek runs
+your detectors next to the built-ins:
+
+```bash
+leakpeek --rules ./rules                 # load every *.toml in a directory
+cat app.log | leakpeek --stdin --rules acme.toml
+leakpeek --fix --rules ./rules           # custom findings get redacted too
+```
+
+A rule file is an array of `[[rule]]` tables. Each rule needs a `name` and a
+`regex`; `kind` is optional and defaults to `secret`:
+
+```toml
+# rules/acme.toml — flag Acme's internal stuff before it hits a chatbot.
+[[rule]]
+name  = "acme-internal-host"
+kind  = "network"                 # secret | private-key | pii | network | entropy
+regex = '[a-z0-9-]+\.acme\.internal'   # single-quote literal strings keep backslashes
+
+[[rule]]
+name  = "acme-employee-id"        # no kind → defaults to "secret"
+regex = 'EMP-[0-9]{6}'
+```
+
+Notes:
+
+- `regex` is a Go/[RE2](https://github.com/google/re2/wiki/Syntax) pattern — the
+  same engine the built-ins use. Prefer `'single quotes'` so backslashes stay
+  literal.
+- Custom detectors are appended after the built-ins, so a real AWS key still
+  reports as `aws-access-key` rather than a broad custom catch-all; your rules
+  claim spans nothing else did.
+- A bad `regex`, an unknown `kind`, or a malformed file fails loudly with a
+  `file:line` diagnostic (exit `1`) instead of silently skipping the rule.
+- In a directory, files are loaded in filename order; `*.local.toml` is honored
+  too and is already git-ignored, so you can keep private rules uncommitted.
+
+A starter file lives at [`rules/example.toml`](./rules/example.toml).
+
 ## Quick idea of the interface (planned)
 
 ```bash
@@ -140,6 +185,7 @@ leakpeek --quiet    # only print on a hit                                     (l
 leakpeek --fix      # put a redacted copy back on the clipboard               (live)
 cat x | leakpeek --fix   # ...or print the redacted text to stdout for a pipe (live)
 leakpeek --fix --strategy full|hash   # pick a redaction style                (live)
+leakpeek --rules ./rules   # load custom detectors from TOML                  (live)
 ```
 
 ## Not a clipboard manager

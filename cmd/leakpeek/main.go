@@ -14,11 +14,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/rwrife/leakpeek/internal/clipboard"
 	"github.com/rwrife/leakpeek/internal/detect"
 	"github.com/rwrife/leakpeek/internal/redact"
 	"github.com/rwrife/leakpeek/internal/report"
+	"github.com/rwrife/leakpeek/internal/rules"
 )
 
 // version is the leakpeek release. Overridable at build time via:
@@ -61,6 +63,8 @@ Flags:
   --strategy <name>  How to redact with --fix: shape (default, keeps a scheme
                      hint like sk-REDACTED), full ([REDACTED-<KIND>]), or hash
                      ([<KIND>:<8hex>], stable & non-reversible).
+  --rules <path>     Load extra detectors from a TOML rule file or a directory
+                     of *.toml files. Custom rules run alongside the built-ins.
   --json             Emit machine-readable JSON instead of the human report.
   --quiet            Print nothing on a clean scan (still reports on a hit).
   --stdin            Read text from stdin instead of the clipboard.
@@ -81,6 +85,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		quiet       bool
 		fix         bool
 		strategy    = redact.Shape
+		rulesPath   string
 	)
 
 	// Minimal stdlib-style flag parsing. We hand-roll it to keep the binary
@@ -124,6 +129,24 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				return exitUsage
 			}
 			strategy = s
+		case "--rules", "-rules":
+			val := inlineVal
+			if !hasInline {
+				// Consume the following argument as the path.
+				if i+1 >= len(args) {
+					fmt.Fprintf(stderr, "leakpeek: --rules needs a path (file or directory)\n\n")
+					fmt.Fprintf(stderr, usage, version, exitFound, exitClean)
+					return exitUsage
+				}
+				i++
+				val = args[i]
+			}
+			if strings.TrimSpace(val) == "" {
+				fmt.Fprintf(stderr, "leakpeek: --rules path must not be empty\n\n")
+				fmt.Fprintf(stderr, usage, version, exitFound, exitClean)
+				return exitUsage
+			}
+			rulesPath = val
 		case "-h", "--help", "-help":
 			fmt.Fprintf(stdout, usage, version, exitFound, exitClean)
 			return exitClean
@@ -148,8 +171,24 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
+	// Build the detection engine: always the built-in pack, plus any custom
+	// rules the user pointed --rules at. Custom detectors are appended after
+	// the built-ins so a real credential still reports under its precise
+	// built-in name during dedupe, while user rules claim spans nothing else
+	// did. A bad rules path/file is an operational error (exit 1), reported
+	// before we scan so the user knows their rules never loaded.
+	engine := detect.Default()
+	if rulesPath != "" {
+		custom, err := rules.LoadPath(rulesPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
+		engine = engine.WithDetectors(custom...)
+	}
+
 	// Frisk it.
-	findings := detect.Default().Scan(text)
+	findings := engine.Scan(text)
 	res := report.Build(text, findings)
 
 	// --fix: redact and hand back a safe copy. When the input came from a

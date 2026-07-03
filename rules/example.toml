@@ -1,0 +1,36 @@
+# leakpeek custom rules — example.
+#
+# Load with:  leakpeek --rules rules/example.toml
+#         or:  leakpeek --rules rules/           (loads every *.toml here)
+#
+# A rule teaches leakpeek one new thing to look for. It's the same shape as a
+# built-in detector: a name, an optional kind, and a Go/RE2 regex. Custom rules
+# run alongside the built-in pack (AWS/GitHub/OpenAI keys, JWTs, emails, …).
+#
+# Fields:
+#   name  = required. How the finding is labeled in the report. Make it stable
+#           and descriptive (e.g. "acme-internal-host").
+#   kind  = optional. One of: secret | private-key | pii | network | entropy.
+#           Defaults to "secret". Controls how the finding is grouped and how
+#           --fix redacts it.
+#   regex = required. A Go/RE2 pattern (https://github.com/google/re2/wiki/Syntax).
+#           Prefer 'single quotes' for the value so backslashes stay literal.
+#
+# Delete these examples and add your own.
+
+# An internal hostname scheme you never want leaking into a chatbot.
+[[rule]]
+name  = "example-internal-host"
+kind  = "network"
+regex = '[a-z0-9-]+\.example\.internal'
+
+# A made-up employee-ID format. No kind → treated as a "secret".
+[[rule]]
+name  = "example-employee-id"
+regex = 'EMP-[0-9]{6}'
+
+# A bespoke API token with a recognizable prefix.
+[[rule]]
+name  = "example-api-token"
+kind  = "secret"
+regex = 'xmpl_[A-Za-z0-9]{32}'

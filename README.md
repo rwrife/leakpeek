@@ -34,7 +34,7 @@ You paste stack traces, configs, and logs into ChatGPT all day. Sometimes they c
 
 The guarantee: for every strategy and every detector, the redacted output contains **no original secret material** (verified per-detector in the test suite). On a clean scan, `--fix` leaves the clipboard untouched and passes piped input through byte-for-byte.
 
-**M6 (custom rules) is landing:** you can now teach leakpeek your own secrets. `--rules <path>` loads extra detectors from a TOML rule file — or a whole directory of `*.toml` files — and runs them **alongside** the built-in pack. A rule is the same `{name, kind, regex}` triple a built-in is, so custom detectors report, group, and redact exactly like the core ones, and built-ins keep priority during de-duplication. This is the extensibility hook from PLAN.md §6; goreleaser cross-builds and a tagged `v0.1.0` release round out M6 next.
+**M6 (custom rules + release) is here:** you can now teach leakpeek your own secrets. `--rules <path>` loads extra detectors from a TOML rule file — or a whole directory of `*.toml` files — and runs them **alongside** the built-in pack. A rule is the same `{name, kind, regex}` triple a built-in is, so custom detectors report, group, and redact exactly like the core ones, and built-ins keep priority during de-duplication. This is the extensibility hook from PLAN.md §6. Release plumbing is wired too: [goreleaser](.goreleaser.yaml) cross-compiles static binaries for macOS/Linux/Windows (amd64 + arm64) and a [release workflow](.github/workflows/release.yml) publishes them — plus a Homebrew formula — on every `v*.*.*` tag. See [Install](#install).
 
 **M5 (cross-platform clipboard hardening) is in:** the clipboard layer now degrades gracefully everywhere a paste happens. Each OS has an ordered list of adapters, and leakpeek walks it — skipping tools that aren't installed **and falling through to the next tool when one is installed but fails at runtime**. So a Linux box with `wl-clipboard` installed but no Wayland compositor running still succeeds via `xclip`/`xsel`; an *empty* Wayland clipboard (where `wl-paste` exits non-zero) reads as empty text instead of an error. When nothing on the host can serve the request you get one clear, friendly message: if no tool is installed it wraps a recognizable sentinel and points you at `--stdin`; if tools were present but all failed it lists each tool and why it broke. See the [platform support matrix](#platform-support) below.
 
@@ -95,7 +95,27 @@ Windows) and fall back to `--stdin` when none is available.
 
 ## Install
 
-Until tagged binaries ship (M6), install from source with Go 1.23+:
+### Homebrew (macOS / Linux)
+
+```bash
+brew install rwrife/tap/leakpeek
+```
+
+### Pre-built binaries
+
+Grab a static binary for your OS/arch from the
+[latest release](https://github.com/rwrife/leakpeek/releases/latest)
+(macOS, Linux, and Windows; amd64 + arm64), unpack it, and drop `leakpeek`
+on your `PATH`. Each release ships a `checksums.txt` so you can verify the
+download:
+
+```bash
+sha256sum -c checksums.txt --ignore-missing
+```
+
+### From source
+
+With Go 1.23+:
 
 ```bash
 go install github.com/rwrife/leakpeek/cmd/leakpeek@latest

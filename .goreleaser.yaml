@@ -1,0 +1,136 @@
+# goreleaser configuration for leakpeek.
+#
+# Cross-compiles the single `leakpeek` binary for macOS/Linux/Windows,
+# packages archives + a checksum file, and (on a real tag) cuts a GitHub
+# Release and updates a Homebrew tap formula.
+#
+# Local dry run (no publish):
+#   goreleaser release --snapshot --clean
+#
+# Config lint:
+#   goreleaser check
+version: 2
+
+project_name: leakpeek
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: leakpeek
+    main: ./cmd/leakpeek
+    binary: leakpeek
+    env:
+      - CGO_ENABLED=0
+    # leakpeek is a per-paste guard: a static binary with no runtime deps is
+    # the whole point, so keep CGO off and strip the build path.
+    flags:
+      - -trimpath
+    ldflags:
+      # Inject the tag into main.version (see cmd/leakpeek/main.go).
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Windows on arm64 is niche and clipboard tooling there is untested;
+    # skip it rather than ship something we can't stand behind.
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: leakpeek
+    ids:
+      - leakpeek
+    # tar.gz everywhere except Windows, which gets a zip.
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - README.md
+      - LICENSE
+      - rules/example.toml
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+release:
+  github:
+    owner: rwrife
+    name: leakpeek
+  draft: false
+  prerelease: auto
+  name_template: "leakpeek {{ .Tag }}"
+  header: |
+    ## leakpeek {{ .Tag }}
+
+    A paranoid bouncer for your clipboard — it frisks your text for secrets,
+    keys, and PII before you paste it into an AI chat. Local-only, no telemetry.
+
+    Grab a binary below, drop it on your `PATH`, and run `leakpeek`.
+  footer: |
+    ---
+    **Full changelog:** https://github.com/rwrife/leakpeek/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+# Homebrew tap. Publishing is gated on the tap repo + token existing, so a
+# plain source checkout / snapshot build never tries to push.
+brews:
+  - name: leakpeek
+    ids:
+      - leakpeek
+    repository:
+      owner: rwrife
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/rwrife/leakpeek"
+    description: "A paranoid bouncer for your clipboard — frisk text for secrets before you paste it into an AI."
+    license: "MIT"
+    # Skip the Homebrew step entirely for prereleases so tap stays on stable.
+    skip_upload: auto
+    commit_author:
+      name: goreleaser-bot
+      email: goreleaser@rwrife.dev
+    test: |
+      system "#{bin}/leakpeek", "--version"
+    install: |
+      bin.install "leakpeek"

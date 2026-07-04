@@ -1,0 +1,46 @@
+name: release
+
+# Cut a GitHub Release with cross-compiled binaries whenever a semver tag is
+# pushed. goreleaser handles the builds, archives, checksums, changelog, and
+# (if the tap token is set) the Homebrew formula.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    name: goreleaser
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # goreleaser needs full history + tags to build the changelog.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run goreleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: a PAT with write access to rwrife/homebrew-tap. When it
+          # is absent the Homebrew step is skipped (see continue-on error note
+          # in .goreleaser.yaml). We default it to the empty string so the
+          # template lookup doesn't hard-fail the run.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

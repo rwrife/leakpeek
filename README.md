@@ -38,6 +38,8 @@ The guarantee: for every strategy and every detector, the redacted output contai
 
 **M5 (cross-platform clipboard hardening) is in:** the clipboard layer now degrades gracefully everywhere a paste happens. Each OS has an ordered list of adapters, and leakpeek walks it — skipping tools that aren't installed **and falling through to the next tool when one is installed but fails at runtime**. So a Linux box with `wl-clipboard` installed but no Wayland compositor running still succeeds via `xclip`/`xsel`; an *empty* Wayland clipboard (where `wl-paste` exits non-zero) reads as empty text instead of an error. When nothing on the host can serve the request you get one clear, friendly message: if no tool is installed it wraps a recognizable sentinel and points you at `--stdin`; if tools were present but all failed it lists each tool and why it broke. See the [platform support matrix](#platform-support) below.
 
+**Watch mode (`--watch`) is in:** leakpeek can now stand guard *continuously*. `leakpeek --watch` stays resident, taps the clipboard on a debounced interval (`--interval`, default `800ms`), and the instant a secret lands on it — before you ever reach the prompt box — it raises a **desktop notification** (`notify-send` / `osascript` / a PowerShell toast, best-effort per OS) and rings the **terminal bell**, plus a one-line stderr alert like `🚫 21:47:49  1 secret (secret) on your clipboard — don't paste that.` It's the doorman that never clocks out. True to the [out-of-scope rules](./PLAN.md#9-out-of-scope), it is **not** a clipboard manager: it stores nothing but an in-memory *hash* of the last value it saw (so it can tell "changed" from "polled again" without ever retaining your clipboard), never phones home, and forgets everything on exit. It's opt-in and stops on `Ctrl-C`; if the host has no clipboard tool at all it fails fast with one clear message instead of looping, and a *transient* read hiccup is logged once (not per tick) while it keeps trying. The polling loop itself is pure and fully unit-tested with a fake clock and clipboard.
+
 ## Build & run (from source)
 
 ```bash
@@ -49,6 +51,8 @@ cat app.log | ./leakpeek --stdin --json    # machine-readable output
 cat secrets.env | ./leakpeek --fix > clean.env        # redact a pipe to stdout
 ./leakpeek --fix                            # redact the clipboard in place
 ./leakpeek --fix --strategy full           # or: --strategy hash
+./leakpeek --watch                          # stand guard: alert the moment a secret is copied
+./leakpeek --watch --interval 500ms        # poll faster (default 800ms, min 100ms)
 ```
 
 Example human report on a dirty input:

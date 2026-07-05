@@ -7,20 +7,29 @@
 // the clipboard — or, when the input came from a pipe, prints the redacted
 // text to stdout so `cat secrets.env | leakpeek --fix > clean.env` works.
 // `--json` emits a machine-readable document; `--quiet` suppresses the report
-// on a clean scan. See PLAN.md for the roadmap.
+// on a clean scan. With `--watch`, leakpeek stays resident and taps the
+// clipboard on an interval, alerting the instant a secret lands on it. See
+// PLAN.md for the roadmap.
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/rwrife/leakpeek/internal/clipboard"
 	"github.com/rwrife/leakpeek/internal/detect"
+	"github.com/rwrife/leakpeek/internal/notify"
 	"github.com/rwrife/leakpeek/internal/redact"
 	"github.com/rwrife/leakpeek/internal/report"
 	"github.com/rwrife/leakpeek/internal/rules"
+	"github.com/rwrife/leakpeek/internal/watch"
 )
 
 // version is the leakpeek release. Overridable at build time via:
@@ -56,7 +65,15 @@ it found. Exits %d when something is found, %d when clean.
 With --fix it also hands back a redacted copy: written to the clipboard, or
 printed to stdout when the input came from a pipe.
 
+With --watch it stays resident, taps the clipboard on an interval, and alerts
+the instant a secret lands on it (desktop notification + terminal bell).
+
 Flags:
+  --watch            Stay resident and watch the clipboard, alerting on any
+                     secret the moment it's copied. Press Ctrl-C to stop.
+                     Stores nothing; scans in memory only.
+  --interval <dur>   Poll cadence for --watch (default 800ms, min 100ms).
+                     Accepts Go durations like 500ms, 2s.
   --fix              Redact the findings. Writes a safe copy back to the
                      clipboard, or prints redacted text to stdout when reading
                      a pipe/--stdin.
@@ -86,6 +103,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fix         bool
 		strategy    = redact.Shape
 		rulesPath   string
+		watchMode   bool
+		interval    time.Duration
 	)
 
 	// Minimal stdlib-style flag parsing. We hand-roll it to keep the binary
@@ -110,6 +129,27 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			quiet = true
 		case "--fix", "-fix":
 			fix = true
+		case "--watch", "-watch":
+			watchMode = true
+		case "--interval", "-interval":
+			val := inlineVal
+			if !hasInline {
+				// Consume the following argument as the value.
+				if i+1 >= len(args) {
+					fmt.Fprintf(stderr, "leakpeek: --interval needs a duration (e.g. 800ms, 2s)\n\n")
+					fmt.Fprintf(stderr, usage, version, exitFound, exitClean)
+					return exitUsage
+				}
+				i++
+				val = args[i]
+			}
+			d, err := time.ParseDuration(strings.TrimSpace(val))
+			if err != nil {
+				fmt.Fprintf(stderr, "leakpeek: invalid --interval %q (want a Go duration like 800ms, 2s)\n\n", val)
+				fmt.Fprintf(stderr, usage, version, exitFound, exitClean)
+				return exitUsage
+			}
+			interval = d
 		case "--strategy", "-strategy":
 			val := inlineVal
 			if !hasInline {
@@ -162,21 +202,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitClean
 	}
 
-	// Source the text: explicit --stdin, an incoming pipe, or the clipboard.
-	// piped tells us whether the input arrived on stdin, which decides where
-	// --fix sends its redacted output (stdout for a pipe, clipboard otherwise).
-	text, piped, err := readInput(useStdin, stdin)
-	if err != nil {
-		fmt.Fprintf(stderr, "leakpeek: %v\n", err)
-		return exitError
-	}
-
 	// Build the detection engine: always the built-in pack, plus any custom
 	// rules the user pointed --rules at. Custom detectors are appended after
 	// the built-ins so a real credential still reports under its precise
 	// built-in name during dedupe, while user rules claim spans nothing else
 	// did. A bad rules path/file is an operational error (exit 1), reported
-	// before we scan so the user knows their rules never loaded.
+	// before we scan so the user knows their rules never loaded. The engine is
+	// built before we touch any input because --watch never reads a one-shot
+	// input at all — it polls the clipboard on its own schedule.
 	engine := detect.Default()
 	if rulesPath != "" {
 		custom, err := rules.LoadPath(rulesPath)
@@ -185,6 +218,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return exitError
 		}
 		engine = engine.WithDetectors(custom...)
+	}
+
+	// --watch: hand off to the resident clipboard watcher. It owns its own
+	// read loop, so none of the one-shot input/report machinery below runs.
+	if watchMode {
+		return runWatch(engine, interval, stderr)
+	}
+
+	// Source the text: explicit --stdin, an incoming pipe, or the clipboard.
+	// piped tells us whether the input arrived on stdin, which decides where
+	// --fix sends its redacted output (stdout for a pipe, clipboard otherwise).
+	text, piped, err := readInput(useStdin, stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+		return exitError
 	}
 
 	// Frisk it.
@@ -214,6 +262,86 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitClean
 	}
 	return exitFound
+}
+
+// runWatch runs the resident clipboard watcher until interrupted (Ctrl-C /
+// SIGTERM). It prints a startup banner to stderr, then on each debounced
+// change scans the clipboard and, on a hit, raises a desktop notification +
+// terminal bell and logs a one-line alert to stderr. It stores nothing beyond
+// an in-memory hash of the last-seen clipboard value. It returns exitClean on
+// a clean stop; watch mode's exit code intentionally reflects the run, not the
+// findings (a long-lived watcher has no single verdict to return).
+//
+// stderr is used for all human output so that, even under --watch, stdout
+// stays clean for any future piping and the alerts never race with a report.
+func runWatch(engine *detect.Engine, interval time.Duration, stderr io.Writer) int {
+	iv := watch.NormalizeInterval(interval)
+
+	// Fail fast when the host has no clipboard tool at all: there's nothing to
+	// watch, and looping would just spam the same error forever. A transient
+	// read failure (tool present but momentarily broken) is NOT fatal here —
+	// only the "no tool installed" sentinel is — so a flaky compositor still
+	// lets watch mode start and recover.
+	if _, err := clipboard.Read(); err != nil && errors.Is(err, clipboard.ErrNoClipboardTool) {
+		fmt.Fprintf(stderr, "leakpeek: watch needs a clipboard tool: %v\n", err)
+		return exitError
+	}
+
+	// Ctrl-C / SIGTERM cancels the context, which unwinds the watch loop.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	notifier := notify.New()
+
+	ticker := time.NewTicker(iv)
+	defer ticker.Stop()
+
+	// lastErr throttles error spam: a recurring identical failure (e.g. the
+	// clipboard tool intermittently unavailable) is logged once, not on every
+	// tick, and re-logs only when the message changes or after a recovery.
+	var lastErr string
+
+	w := &watch.Watcher{
+		Read:     clipboard.Read,
+		Scan:     watch.EngineScan(engine),
+		Interval: iv,
+		Notify: func(total int, kinds []string) {
+			title, body := notify.Message(total, kinds)
+			notifier.Notify(title, body, stderr)
+			lastErr = "" // a successful read/scan clears the throttle
+		},
+		OnHit: func(total int, kinds []string, at time.Time) {
+			noun := "secret"
+			if total != 1 {
+				noun = "secrets"
+			}
+			kindStr := ""
+			if len(kinds) > 0 {
+				kindStr = " (" + strings.Join(kinds, ", ") + ")"
+			}
+			fmt.Fprintf(stderr, "🚫 %s  %d %s%s on your clipboard — don't paste that.\n",
+				at.Format("15:04:05"), total, noun, kindStr)
+		},
+		OnClean: func(time.Time) { lastErr = "" },
+		OnError: func(err error) {
+			// Clipboard read hiccups are non-fatal; note them but keep watching.
+			// Collapse repeats so a persistent transient failure doesn't flood.
+			msg := err.Error()
+			if msg == lastErr {
+				return
+			}
+			lastErr = msg
+			fmt.Fprintf(stderr, "leakpeek: watch: %v (will keep trying)\n", err)
+		},
+	}
+
+	watch.WriteBanner(stderr, iv)
+	if err := w.Run(ctx, ticker.C); err != nil && err != context.Canceled {
+		fmt.Fprintf(stderr, "leakpeek: watch: %v\n", err)
+		return exitError
+	}
+	fmt.Fprintln(stderr, "👋 leakpeek stopped watching.")
+	return exitClean
 }
 
 // runFix performs the --fix path: it redacts text and either prints the

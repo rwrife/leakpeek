@@ -28,6 +28,12 @@
 // deliberately preserves — an email's domain or an IP's first octet — which
 // is infra-shape, not credential material, and mirrors what the report
 // already shows.)
+//
+// A fourth, opt-in strategy — Vault (see RedactWithVault) — is *reversible*:
+// instead of destroying the secret it swaps in an opaque placeholder and
+// records the mapping in a vault so an AI's reply can later be un-redacted.
+// It's kept separate from the one-way strategies above because it needs a
+// place to stash the mapping, which plain Redact has nowhere to put.
 package redact
 
 import (
@@ -37,6 +43,7 @@ import (
 	"strings"
 
 	"github.com/rwrife/leakpeek/internal/detect"
+	"github.com/rwrife/leakpeek/internal/vault"
 )
 
 // Strategy selects how a matched secret is rewritten. The zero value is
@@ -53,6 +60,12 @@ const (
 	// Hash replaces the match with [<KIND>:<8-hex>], a stable non-reversible
 	// fingerprint useful for correlating repeats without revealing them.
 	Hash
+	// Vault replaces the match with an opaque, *reversible* placeholder
+	// ([LEAKPEEK:<hex>]) and records placeholder→original in a vault so an
+	// AI's reply can be un-redacted later. Only usable via RedactWithVault,
+	// which supplies the vault; plain Redact treats it like Full so it can
+	// never silently drop a mapping on the floor.
+	Vault
 )
 
 // String renders the strategy name (handy for --help / flag parsing / tests).
@@ -62,6 +75,8 @@ func (s Strategy) String() string {
 		return "full"
 	case Hash:
 		return "hash"
+	case Vault:
+		return "vault"
 	default:
 		return "shape"
 	}
@@ -78,6 +93,8 @@ func ParseStrategy(s string) (Strategy, bool) {
 		return Full, true
 	case "hash":
 		return Hash, true
+	case "vault":
+		return Vault, true
 	default:
 		return Shape, false
 	}
@@ -128,11 +145,62 @@ func Redact(text string, findings []detect.Finding, strategy Strategy) string {
 	return b.String()
 }
 
+// RedactWithVault is the reversible cousin of Redact. It rewrites every
+// finding as an opaque placeholder minted by v (via v.Placeholder) and, as a
+// side effect, records placeholder→original in v so a later Restore can put
+// the secrets back. It returns the redacted text; the mappings live in v.
+//
+// Unlike the one-way strategies, this keeps the secret — in v — which is the
+// whole point: it lets `leakpeek --unredact` reverse an AI's reply. Callers
+// are responsible for v's lifecycle (persist it if the un-redaction happens
+// in a later process, and clear it when done) so secrets don't linger.
+//
+// Overlap/ordering handling mirrors Redact exactly: findings are sorted, and
+// any span overlapping one already rewritten is skipped, so output bytes are
+// never double-spliced. An empty finding set (or nil v) returns text
+// unchanged.
+func RedactWithVault(text string, findings []detect.Finding, v *vault.Vault) string {
+	if len(findings) == 0 || v == nil {
+		return text
+	}
+
+	fs := make([]detect.Finding, len(findings))
+	copy(fs, findings)
+	sort.SliceStable(fs, func(i, j int) bool {
+		if fs[i].Start != fs[j].Start {
+			return fs[i].Start < fs[j].Start
+		}
+		return fs[i].Len() > fs[j].Len()
+	})
+
+	var b strings.Builder
+	b.Grow(len(text))
+	cursor := 0
+	for _, f := range fs {
+		if f.Start < cursor || f.Start < 0 || f.End > len(text) || f.Start >= f.End {
+			continue
+		}
+		b.WriteString(text[cursor:f.Start])
+		// Mint (or reuse) a reversible placeholder for exactly the matched
+		// bytes, so Restore's substitution reproduces the original precisely.
+		b.WriteString(v.Placeholder(text[f.Start:f.End]))
+		cursor = f.End
+	}
+	b.WriteString(text[cursor:])
+	return b.String()
+}
+
 // replacement computes the stand-in string for a single finding under the
 // chosen strategy.
+//
+// Vault is intentionally not handled here: it needs a live *vault.Vault to
+// record the mapping, which this pure function has no access to, so callers
+// must route Vault through RedactWithVault. If a Vault strategy ever reaches
+// this path we fall back to Full — a safe, non-reversible redaction — rather
+// than leak the secret by echoing it.
 func replacement(f detect.Finding, strategy Strategy) string {
 	switch strategy {
-	case Full:
+	case Full, Vault:
 		return "[REDACTED-" + kindLabel(f.Kind) + "]"
 	case Hash:
 		return "[" + kindLabel(f.Kind) + ":" + fingerprint(f.Match) + "]"

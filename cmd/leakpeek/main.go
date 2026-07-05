@@ -8,8 +8,14 @@
 // text to stdout so `cat secrets.env | leakpeek --fix > clean.env` works.
 // `--json` emits a machine-readable document; `--quiet` suppresses the report
 // on a clean scan. With `--watch`, leakpeek stays resident and taps the
-// clipboard on an interval, alerting the instant a secret lands on it. See
-// PLAN.md for the roadmap.
+// clipboard on an interval, alerting the instant a secret lands on it.
+//
+// The reversible vault closes the loop with an AI: `--fix --strategy vault`
+// swaps each secret for an opaque, restorable placeholder and remembers the
+// mapping in a short-lived, owner-only session file; later, `--unredact`
+// reads the AI's reply (clipboard or pipe) and splices your originals back
+// in. `--vault-clear` wipes the session so nothing lingers. See PLAN.md for
+// the roadmap.
 package main
 
 import (
@@ -29,6 +35,7 @@ import (
 	"github.com/rwrife/leakpeek/internal/redact"
 	"github.com/rwrife/leakpeek/internal/report"
 	"github.com/rwrife/leakpeek/internal/rules"
+	"github.com/rwrife/leakpeek/internal/vault"
 	"github.com/rwrife/leakpeek/internal/watch"
 )
 
@@ -65,6 +72,11 @@ it found. Exits %d when something is found, %d when clean.
 With --fix it also hands back a redacted copy: written to the clipboard, or
 printed to stdout when the input came from a pipe.
 
+With --strategy vault the redaction is *reversible*: secrets become opaque
+[LEAKPEEK:…] placeholders and the mapping is saved to a short-lived,
+owner-only session. After the AI replies, run --unredact to restore your
+originals from its response.
+
 With --watch it stays resident, taps the clipboard on an interval, and alerts
 the instant a secret lands on it (desktop notification + terminal bell).
 
@@ -78,8 +90,20 @@ Flags:
                      clipboard, or prints redacted text to stdout when reading
                      a pipe/--stdin.
   --strategy <name>  How to redact with --fix: shape (default, keeps a scheme
-                     hint like sk-REDACTED), full ([REDACTED-<KIND>]), or hash
-                     ([<KIND>:<8hex>], stable & non-reversible).
+                     hint like sk-REDACTED), full ([REDACTED-<KIND>]), hash
+                     ([<KIND>:<8hex>], stable & non-reversible), or vault
+                     ([LEAKPEEK:<hex>], reversible via --unredact).
+  --unredact         Reverse a previous --strategy vault redaction: read the
+                     AI's reply (clipboard or pipe) and restore the original
+                     secrets from the saved session. Clears the session on a
+                     successful restore unless --keep-vault is given.
+  --vault-clear      Delete the saved reversible-redaction session and exit.
+                     Use this to forget stored secrets on demand.
+  --keep-vault       With --unredact, keep the session afterward (default is
+                     to clear it once restored) so you can un-redact again.
+  --no-vault         With --fix --strategy vault, do NOT persist the mapping
+                     to disk. The redaction still works, but --unredact in a
+                     later run won't be able to reverse it.
   --rules <path>     Load extra detectors from a TOML rule file or a directory
                      of *.toml files. Custom rules run alongside the built-ins.
   --json             Emit machine-readable JSON instead of the human report.
@@ -105,6 +129,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		rulesPath   string
 		watchMode   bool
 		interval    time.Duration
+		unredact    bool
+		vaultClear  bool
+		keepVault   bool
+		noVault     bool
 	)
 
 	// Minimal stdlib-style flag parsing. We hand-roll it to keep the binary
@@ -129,6 +157,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			quiet = true
 		case "--fix", "-fix":
 			fix = true
+		case "--unredact", "-unredact":
+			unredact = true
+		case "--vault-clear", "-vault-clear":
+			vaultClear = true
+		case "--keep-vault", "-keep-vault":
+			keepVault = true
+		case "--no-vault", "-no-vault":
+			noVault = true
 		case "--watch", "-watch":
 			watchMode = true
 		case "--interval", "-interval":
@@ -202,6 +238,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitClean
 	}
 
+	// --vault-clear is a standalone lifecycle command: wipe the saved
+	// reversible-redaction session and exit. It reads no input and runs no
+	// detectors — it exists purely so a user can say "forget my stored secrets
+	// now" without redacting or un-redacting anything.
+	if vaultClear {
+		return runVaultClear(stdout, stderr)
+	}
+
 	// Build the detection engine: always the built-in pack, plus any custom
 	// rules the user pointed --rules at. Custom detectors are appended after
 	// the built-ins so a real credential still reports under its precise
@@ -226,6 +270,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runWatch(engine, interval, stderr)
 	}
 
+	// --unredact is the reverse of --fix --strategy vault: it reads the AI's
+	// reply (clipboard or pipe), loads the saved session, and splices the
+	// original secrets back over their placeholders. It runs no detectors —
+	// there's nothing to detect, only placeholders to restore — so it
+	// short-circuits before the scan machinery below. It honors --stdin/pipe
+	// for input the same way the scan path does, and (like --fix) sends its
+	// restored payload to stdout when piped, or back to the clipboard
+	// otherwise.
+	if unredact {
+		text, piped, err := readInput(useStdin, stdin)
+		if err != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
+		return runUnredact(text, piped, keepVault, quiet, stdout, stderr)
+	}
+
 	// Source the text: explicit --stdin, an incoming pipe, or the clipboard.
 	// piped tells us whether the input arrived on stdin, which decides where
 	// --fix sends its redacted output (stdout for a pipe, clipboard otherwise).
@@ -246,7 +307,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// to avoid needlessly churning the clipboard on a clean scan. The human
 	// report then goes to stderr so it never contaminates piped stdout.
 	if fix {
-		return runFix(res, findings, text, strategy, piped, asJSON, quiet, stdout, stderr)
+		return runFix(res, findings, text, strategy, piped, asJSON, quiet, noVault, stdout, stderr)
 	}
 
 	if asJSON {
@@ -349,15 +410,37 @@ func runWatch(engine *detect.Engine, interval time.Duration, stderr io.Writer) i
 // input), then emits the report to stderr. It returns the process exit code
 // (exitFound on a hit, exitClean when clean, exitError if a clipboard write
 // fails). Splitting it out of run keeps the flag-handling readable.
+//
+// When strategy is redact.Vault the redaction is reversible: secrets become
+// [LEAKPEEK:…] placeholders and, unless noVault is set, the placeholder→secret
+// mapping is persisted to a private session so a later --unredact can reverse
+// it. Persisting is best-effort in the sense that a save failure is surfaced
+// as an error (the user asked for reversibility and should know it didn't
+// stick), but the redacted text is still delivered first so the secret is
+// never left on the clipboard.
 func runFix(
 	res report.Result,
 	findings []detect.Finding,
 	text string,
 	strategy redact.Strategy,
-	piped, asJSON, quiet bool,
+	piped, asJSON, quiet, noVault bool,
 	stdout, stderr io.Writer,
 ) int {
-	redacted := redact.Redact(text, findings, strategy)
+	var (
+		redacted  string
+		vaultSave *vault.Vault // non-nil only when we should persist a session
+	)
+	if strategy == redact.Vault {
+		v := vault.New()
+		redacted = redact.RedactWithVault(text, findings, v)
+		// Only persist when we actually captured mappings and the user didn't
+		// opt out. An empty vault (clean scan) has nothing to save.
+		if !noVault && !v.Empty() {
+			vaultSave = v
+		}
+	} else {
+		redacted = redact.Redact(text, findings, strategy)
+	}
 
 	if piped {
 		// Pipe mode: redacted text is the payload, so it owns stdout. Print it
@@ -366,7 +449,11 @@ func runFix(
 			fmt.Fprintf(stderr, "leakpeek: writing redacted output: %v\n", err)
 			return exitError
 		}
-		emitFixReport(res, asJSON, quiet, stderr, stderr, false)
+		if err := persistVault(vaultSave); err != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
+		emitFixReport(res, asJSON, quiet, stderr, stderr, false, vaultSave != nil)
 	} else {
 		// Clipboard mode: only write back when we changed something, so a clean
 		// scan leaves the clipboard untouched.
@@ -376,7 +463,11 @@ func runFix(
 				return exitError
 			}
 		}
-		emitFixReport(res, asJSON, quiet, stdout, stderr, true)
+		if err := persistVault(vaultSave); err != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
+		emitFixReport(res, asJSON, quiet, stdout, stderr, true, vaultSave != nil)
 	}
 
 	if res.Clean {
@@ -385,12 +476,25 @@ func runFix(
 	return exitFound
 }
 
+// persistVault saves v to the default session directory when v is non-nil.
+// A nil v (non-vault strategy, opted out, or empty) is a no-op returning nil.
+func persistVault(v *vault.Vault) error {
+	if v == nil {
+		return nil
+	}
+	if err := v.Save(vault.DefaultDir()); err != nil {
+		return fmt.Errorf("saving reversible-redaction session: %w", err)
+	}
+	return nil
+}
+
 // emitFixReport writes the findings report for a --fix run to out (JSON or the
 // human table). On a hit in human mode it adds a short confirmation line; the
 // wording depends on where the redacted copy went — the clipboard (toClipboard
-// true) or stdout (false) — so the message never claims a clipboard write that
-// didn't happen.
-func emitFixReport(res report.Result, asJSON, quiet bool, out, jsonErr io.Writer, toClipboard bool) {
+// true) or stdout (false). When savedVault is true it also notes that the
+// mapping was stored and how to reverse it, so the reversible workflow is
+// discoverable right where it's used.
+func emitFixReport(res report.Result, asJSON, quiet bool, out, jsonErr io.Writer, toClipboard, savedVault bool) {
 	if asJSON {
 		if err := report.RenderJSON(out, res); err != nil {
 			fmt.Fprintf(jsonErr, "leakpeek: rendering json: %v\n", err)
@@ -404,7 +508,122 @@ func emitFixReport(res report.Result, asJSON, quiet bool, out, jsonErr io.Writer
 		} else {
 			fmt.Fprintln(out, "✍️  Redacted copy written to stdout.")
 		}
+		if savedVault {
+			fmt.Fprintln(out, "🔐 Reversible: after the AI replies, run `leakpeek --unredact` to restore your secrets.")
+		}
 	}
+}
+
+// runUnredact reverses a prior reversible redaction. It loads the saved
+// session, restores the original secrets over their placeholders in text, and
+// delivers the result to stdout (pipe input) or the clipboard (otherwise).
+// Unless keepVault is set, it clears the session after a successful restore so
+// the stored secrets don't linger past their single intended use.
+//
+// Exit codes: exitClean on success (including the benign "nothing to restore"
+// cases, which are informational, not failures) and exitError only on a real
+// I/O failure (couldn't read the session for a non-"missing"/non-"expired"
+// reason, or couldn't write the restored text back).
+func runUnredact(text string, piped, keepVault, quiet bool, stdout, stderr io.Writer) int {
+	dir := vault.DefaultDir()
+
+	v, err := vault.Load(dir)
+	if err != nil {
+		switch {
+		case errors.Is(err, vault.ErrNoSession):
+			fmt.Fprintln(stderr, "leakpeek: no reversible-redaction session to restore from.")
+			fmt.Fprintln(stderr, "  (Redact with `--fix --strategy vault` first, and don't pass --no-vault.)")
+			return exitClean
+		case errors.Is(err, vault.ErrExpired):
+			fmt.Fprintln(stderr, "leakpeek: your reversible-redaction session expired and was cleared.")
+			fmt.Fprintln(stderr, "  Re-redact the original text to un-redact a fresh reply.")
+			return exitClean
+		default:
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
+	}
+
+	restored, n := v.Restore(text)
+
+	if n == 0 {
+		// The session loaded but none of its placeholders appear in the input.
+		// Don't touch the clipboard or emit the (unchanged) text to a pipe's
+		// stdout would be harmless, but for clipboard mode we deliberately
+		// leave things be. Tell the user why nothing happened.
+		if piped {
+			_, _ = io.WriteString(stdout, restored)
+		}
+		if !quiet {
+			msg := "leakpeek: no leakpeek placeholders found in the input — nothing to un-redact."
+			if !vault.LooksLikePlaceholder(text) {
+				msg += "\n  (Did you paste the AI's reply that still contains the [LEAKPEEK:…] tokens?)"
+			}
+			fmt.Fprintln(stderr, msg)
+		}
+		return exitClean
+	}
+
+	// Deliver the restored text.
+	if piped {
+		if _, err := io.WriteString(stdout, restored); err != nil {
+			fmt.Fprintf(stderr, "leakpeek: writing restored output: %v\n", err)
+			return exitError
+		}
+	} else {
+		if err := clipboard.Write(restored); err != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
+	}
+
+	// Lifecycle: clear the session after a successful restore unless asked to
+	// keep it. Clearing is the safe default — the secrets have served their
+	// purpose — but a clear failure is non-fatal: the un-redaction already
+	// succeeded, so we warn rather than fail the whole command.
+	cleared := false
+	if !keepVault {
+		if _, cerr := vault.Clear(dir); cerr != nil {
+			fmt.Fprintf(stderr, "leakpeek: warning: %v (session left in place)\n", cerr)
+		} else {
+			cleared = true
+		}
+	}
+
+	if !quiet {
+		noun := "secret"
+		if n != 1 {
+			noun = "secrets"
+		}
+		dest := "clipboard"
+		if piped {
+			dest = "stdout"
+		}
+		fmt.Fprintf(stderr, "🔓 Restored %d %s to your %s.\n", n, noun, dest)
+		if cleared {
+			fmt.Fprintln(stderr, "🧹 Session cleared. (Pass --keep-vault to un-redact again.)")
+		} else if keepVault {
+			fmt.Fprintln(stderr, "📌 Session kept (--keep-vault). Run --vault-clear when you're done.")
+		}
+	}
+	return exitClean
+}
+
+// runVaultClear wipes the saved reversible-redaction session and reports what
+// happened. It always returns exitClean unless the removal itself failed
+// (exitError); a missing session is a perfectly fine "already clean" outcome.
+func runVaultClear(stdout, stderr io.Writer) int {
+	removed, err := vault.Clear(vault.DefaultDir())
+	if err != nil {
+		fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+		return exitError
+	}
+	if removed {
+		fmt.Fprintln(stdout, "🧹 Reversible-redaction session cleared. Stored secrets are gone.")
+	} else {
+		fmt.Fprintln(stdout, "✨ No reversible-redaction session to clear — nothing stored.")
+	}
+	return exitClean
 }
 
 // splitFlag splits a `--name=value` argument into its name and value. For a

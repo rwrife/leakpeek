@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/rwrife/leakpeek/internal/detect"
+	"github.com/rwrife/leakpeek/internal/vault"
 )
 
 // scan is a tiny helper: run the default engine over text and return the
@@ -26,6 +27,8 @@ func TestParseStrategy(t *testing.T) {
 		"full":   {Full, true},
 		"hash":   {Hash, true},
 		"Hash":   {Hash, true},
+		"vault":  {Vault, true},
+		"VAULT":  {Vault, true},
 		"bogus":  {Shape, false},
 	}
 	for in, want := range cases {
@@ -37,7 +40,7 @@ func TestParseStrategy(t *testing.T) {
 }
 
 func TestStrategyString(t *testing.T) {
-	for s, want := range map[Strategy]string{Shape: "shape", Full: "full", Hash: "hash"} {
+	for s, want := range map[Strategy]string{Shape: "shape", Full: "full", Hash: "hash", Vault: "vault"} {
 		if got := s.String(); got != want {
 			t.Errorf("Strategy(%d).String() = %q, want %q", s, got, want)
 		}
@@ -249,5 +252,84 @@ func TestRedactPrivateKeyHeader(t *testing.T) {
 	}
 	if !strings.Contains(out, "[REDACTED]") {
 		t.Errorf("expected a [REDACTED] marker for the key header: %q", out)
+	}
+}
+
+// TestRedactWithVaultRoundTrips is the reversible strategy's headline: the
+// redacted text leaks no secret material, yet the recorded vault can restore
+// the exact original from the redacted text.
+func TestRedactWithVaultRoundTrips(t *testing.T) {
+	for _, tc := range secretSamples {
+		findings := scan(t, tc.text)
+		if len(findings) == 0 {
+			t.Fatalf("%s: sample produced no findings: %q", tc.name, tc.text)
+		}
+		v := vault.New()
+		redacted := RedactWithVault(tc.text, findings, v)
+
+		// No secret material may survive in the redacted text.
+		for _, secret := range tc.secrets {
+			if strings.Contains(redacted, secret) {
+				t.Errorf("%s: vault redaction leaked %q\n  out: %q", tc.name, secret, redacted)
+			}
+		}
+		if redacted == tc.text {
+			t.Errorf("%s: vault redaction was a no-op", tc.name)
+		}
+
+		// Restoring the redacted text must reproduce the original byte-for-byte.
+		restored, n := v.Restore(redacted)
+		if n == 0 {
+			t.Errorf("%s: Restore found no placeholders to reverse", tc.name)
+		}
+		if restored != tc.text {
+			t.Errorf("%s: round-trip mismatch\n  got:  %q\n  want: %q", tc.name, restored, tc.text)
+		}
+	}
+}
+
+// TestRedactWithVaultEmptyAndNil: no findings, or a nil vault, returns text
+// unchanged rather than panicking.
+func TestRedactWithVaultEmptyAndNil(t *testing.T) {
+	text := "perfectly innocent prose"
+	if got := RedactWithVault(text, nil, vault.New()); got != text {
+		t.Errorf("no-findings vault redaction changed text: %q", got)
+	}
+	if got := RedactWithVault(text, scan(t, text), nil); got != text {
+		t.Errorf("nil-vault redaction changed text: %q", got)
+	}
+}
+
+// TestRedactWithVaultDedupesRepeats: the same secret appearing twice yields
+// the same placeholder both times (one mapping), so the vault stays compact
+// and a reader can see the two spots share a value.
+func TestRedactWithVaultDedupesRepeats(t *testing.T) {
+	text := "a=AKIAIOSFODNN7EXAMPLE b=AKIAIOSFODNN7EXAMPLE"
+	v := vault.New()
+	redacted := RedactWithVault(text, scan(t, text), v)
+	if v.Len() != 1 {
+		t.Errorf("repeated secret should yield 1 mapping, got %d", v.Len())
+	}
+	// The placeholder should appear twice in the redacted output.
+	if strings.Contains(redacted, "AKIAIOSFODNN7EXAMPLE") {
+		t.Errorf("vault redaction leaked the repeated secret: %q", redacted)
+	}
+	restored, n := v.Restore(redacted)
+	if n != 2 || restored != text {
+		t.Errorf("round-trip of repeated secret failed: got %q n=%d", restored, n)
+	}
+}
+
+// TestVaultStrategyViaReplacementFallsBackSafely: if the Vault strategy ever
+// reaches the pure Redact path (which has no vault), it must fall back to a
+// non-reversible redaction rather than echo the secret.
+func TestVaultStrategyViaReplacementFallsBackSafely(t *testing.T) {
+	text := "k=AKIAIOSFODNN7EXAMPLE"
+	out := Redact(text, scan(t, text), Vault)
+	if strings.Contains(out, "AKIAIOSFODNN7EXAMPLE") {
+		t.Errorf("Vault-through-Redact leaked the secret: %q", out)
+	}
+	if !strings.Contains(out, "[REDACTED-") {
+		t.Errorf("Vault-through-Redact should fall back to a full redaction: %q", out)
 	}
 }

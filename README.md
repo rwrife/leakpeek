@@ -34,6 +34,8 @@ You paste stack traces, configs, and logs into ChatGPT all day. Sometimes they c
 
 The guarantee: for every strategy and every detector, the redacted output contains **no original secret material** (verified per-detector in the test suite). On a clean scan, `--fix` leaves the clipboard untouched and passes piped input through byte-for-byte.
 
+**Reversible redaction vault is in:** the fourth strategy, `--strategy vault`, closes the loop with the AI. Instead of destroying each secret it swaps in an opaque, **reversible** placeholder — `[LEAKPEEK:1a5d44a2]` — and remembers the mapping in a short-lived, owner-only (`0600`) session file under your temp dir. When the AI's reply echoes those placeholders back at you, `leakpeek --unredact` reads it (clipboard or pipe) and splices your real values back in. Identical secrets collapse to one placeholder (so you can see two spots hold the same value) and the placeholder itself leaks nothing — it's derived from a hash, not the secret. Lifecycle is deliberately tight so nothing lingers: sessions carry a **15-minute TTL** (an expired one is refused *and wiped* on the next read), `--unredact` **clears the session by default** once it restores (pass `--keep-vault` to reuse it), `--vault-clear` wipes it on demand, and `--no-vault` redacts reversibly-shaped tokens while storing nothing at all. It never leaves your machine — the map touches disk only for this one local hop between redact and un-redact. This is the [Reversible redaction vault](./PLAN.md#8-backlog--future-features-v02) from the backlog.
+
 **M6 (custom rules + release) is here:** you can now teach leakpeek your own secrets. `--rules <path>` loads extra detectors from a TOML rule file — or a whole directory of `*.toml` files — and runs them **alongside** the built-in pack. A rule is the same `{name, kind, regex}` triple a built-in is, so custom detectors report, group, and redact exactly like the core ones, and built-ins keep priority during de-duplication. This is the extensibility hook from PLAN.md §6. Release plumbing is wired too: [goreleaser](.goreleaser.yaml) cross-compiles static binaries for macOS/Linux/Windows (amd64 + arm64) and a [release workflow](.github/workflows/release.yml) publishes them — plus a Homebrew formula — on every `v*.*.*` tag. See [Install](#install).
 
 **M5 (cross-platform clipboard hardening) is in:** the clipboard layer now degrades gracefully everywhere a paste happens. Each OS has an ordered list of adapters, and leakpeek walks it — skipping tools that aren't installed **and falling through to the next tool when one is installed but fails at runtime**. So a Linux box with `wl-clipboard` installed but no Wayland compositor running still succeeds via `xclip`/`xsel`; an *empty* Wayland clipboard (where `wl-paste` exits non-zero) reads as empty text instead of an error. When nothing on the host can serve the request you get one clear, friendly message: if no tool is installed it wraps a recognizable sentinel and points you at `--stdin`; if tools were present but all failed it lists each tool and why it broke. See the [platform support matrix](#platform-support) below.
@@ -199,6 +201,36 @@ Notes:
 
 A starter file lives at [`rules/example.toml`](./rules/example.toml).
 
+## Reversible redaction (un-redact an AI's reply)
+
+Sometimes you don't just want to *hide* a secret — you want the AI's answer to still make sense when it hands your placeholder back. The `vault` strategy makes redaction reversible:
+
+```bash
+# 1) Redact reversibly. Secrets become opaque, restorable placeholders,
+#    and the mapping is saved to a private, short-lived session.
+leakpeek --fix --strategy vault
+#   deploy with AKIAIOSFODNN7EXAMPLE  ->  deploy with [LEAKPEEK:1a5d44a2]
+
+# 2) Paste the redacted text into your AI. It answers, echoing the
+#    [LEAKPEEK:...] tokens. Copy its reply, then:
+leakpeek --unredact
+#   ...connect to [LEAKPEEK:1a5d44a2]  ->  ...connect to AKIAIOSFODNN7EXAMPLE
+```
+
+It composes in pipes too:
+
+```bash
+printf 'ssh key AKIAIOSFODNN7EXAMPLE\n' | leakpeek --fix --strategy vault --quiet | tee redacted.txt
+cat ai_reply.txt | leakpeek --unredact > restored.txt
+```
+
+How it stays safe:
+
+- **Local-only, single hop.** The placeholder→secret map is written *only* to an owner-only (`0600`) `session.json` in a private (`0700`) folder under your OS temp dir — the one place it needs to persist so a *later* `--unredact` process can find it. It never phones home.
+- **Opaque placeholders.** `[LEAKPEEK:<hex>]` is derived from a hash of the secret, so it reveals nothing; identical secrets share one placeholder so you can still see two spots hold the same value.
+- **Tight lifecycle.** Sessions expire after **15 minutes** (an expired one is refused *and deleted* on the next read). `--unredact` **clears the session by default** once it restores — pass `--keep-vault` to un-redact more than once. Wipe it anytime with `leakpeek --vault-clear`.
+- **Opt out entirely.** `--fix --strategy vault --no-vault` emits the reversible-shaped placeholders but stores **nothing** on disk (so nothing to reverse later, and nothing to clean up).
+
 ## Quick idea of the interface (planned)
 
 ```bash
@@ -209,6 +241,9 @@ leakpeek --quiet    # only print on a hit                                     (l
 leakpeek --fix      # put a redacted copy back on the clipboard               (live)
 cat x | leakpeek --fix   # ...or print the redacted text to stdout for a pipe (live)
 leakpeek --fix --strategy full|hash   # pick a redaction style                (live)
+leakpeek --fix --strategy vault   # reversible: swap in restorable placeholders (live)
+leakpeek --unredact   # restore secrets in an AI reply that echoed placeholders (live)
+leakpeek --vault-clear   # forget the stored reversible-redaction session       (live)
 leakpeek --rules ./rules   # load custom detectors from TOML                  (live)
 ```
 

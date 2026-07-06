@@ -38,6 +38,8 @@ The guarantee: for every strategy and every detector, the redacted output contai
 
 **M6 (custom rules + release) is here:** you can now teach leakpeek your own secrets. `--rules <path>` loads extra detectors from a TOML rule file — or a whole directory of `*.toml` files — and runs them **alongside** the built-in pack. A rule is the same `{name, kind, regex}` triple a built-in is, so custom detectors report, group, and redact exactly like the core ones, and built-ins keep priority during de-duplication. This is the extensibility hook from PLAN.md §6. Release plumbing is wired too: [goreleaser](.goreleaser.yaml) cross-compiles static binaries for macOS/Linux/Windows (amd64 + arm64) and a [release workflow](.github/workflows/release.yml) publishes them — plus a Homebrew formula — on every `v*.*.*` tag. See [Install](#install).
 
+**Format-aware redaction is in:** paste a `.env`, a JSON blob, or some YAML and you usually want the *shape* back — the keys, the nesting, the punctuation — with only the **values** scrubbed. `leakpeek --fix --format-aware` (alias `--format`) does exactly that: it sniffs the format, then redacts the values that carry a secret while leaving keys and structure byte-for-byte intact, so the AI still sees `"database_url": "[REDACTED-SECRET]"` instead of a hole where the structure used to be. It's **finding-driven**, not key-name-guessing: a value is only touched when a real detector fires inside it, so innocuous config (`"port": 5432`) is left exactly as written and a secret-shaped *key* (an email used as a JSON key) is never redacted — we redact values, not keys. JSON output stays valid JSON (quotes kept around the placeholder); quoted `.env` values keep their quotes and any trailing `# comment`; YAML keeps its indentation and list structure. Anything the format pass doesn't model — a secret sitting in a comment, or text that isn't structured at all — falls back to the ordinary span-based redaction, so nothing sensitive is ever left behind. Works with every strategy (`shape`/`full`/`hash`). This is the [Format-aware redaction](./PLAN.md#8-backlog--future-features-v02) item from the backlog.
+
 **M5 (cross-platform clipboard hardening) is in:** the clipboard layer now degrades gracefully everywhere a paste happens. Each OS has an ordered list of adapters, and leakpeek walks it — skipping tools that aren't installed **and falling through to the next tool when one is installed but fails at runtime**. So a Linux box with `wl-clipboard` installed but no Wayland compositor running still succeeds via `xclip`/`xsel`; an *empty* Wayland clipboard (where `wl-paste` exits non-zero) reads as empty text instead of an error. When nothing on the host can serve the request you get one clear, friendly message: if no tool is installed it wraps a recognizable sentinel and points you at `--stdin`; if tools were present but all failed it lists each tool and why it broke. See the [platform support matrix](#platform-support) below.
 
 **Watch mode (`--watch`) is in:** leakpeek can now stand guard *continuously*. `leakpeek --watch` stays resident, taps the clipboard on a debounced interval (`--interval`, default `800ms`), and the instant a secret lands on it — before you ever reach the prompt box — it raises a **desktop notification** (`notify-send` / `osascript` / a PowerShell toast, best-effort per OS) and rings the **terminal bell**, plus a one-line stderr alert like `🚫 21:47:49  1 secret (secret) on your clipboard — don't paste that.` It's the doorman that never clocks out. True to the [out-of-scope rules](./PLAN.md#9-out-of-scope), it is **not** a clipboard manager: it stores nothing but an in-memory *hash* of the last value it saw (so it can tell "changed" from "polled again" without ever retaining your clipboard), never phones home, and forgets everything on exit. It's opt-in and stops on `Ctrl-C`; if the host has no clipboard tool at all it fails fast with one clear message instead of looping, and a *transient* read hiccup is logged once (not per tick) while it keeps trying. The polling loop itself is pure and fully unit-tested with a fake clock and clipboard.
@@ -231,6 +233,33 @@ How it stays safe:
 - **Tight lifecycle.** Sessions expire after **15 minutes** (an expired one is refused *and deleted* on the next read). `--unredact` **clears the session by default** once it restores — pass `--keep-vault` to un-redact more than once. Wipe it anytime with `leakpeek --vault-clear`.
 - **Opt out entirely.** `--fix --strategy vault --no-vault` emits the reversible-shaped placeholders but stores **nothing** on disk (so nothing to reverse later, and nothing to clean up).
 
+## Format-aware redaction (keep the shape, scrub the values)
+
+Structured config is the common case for "paste this into an AI and help me debug it" — and there you want the keys and shape preserved, not a blunt splice. Add `--format-aware` (or `--format`) to `--fix`:
+
+```bash
+# JSON: keys and structure preserved, only secret-bearing values redacted,
+# and the output is still valid JSON.
+$ printf '{"db_password":"AKIAIOSFODNN7EXAMPLE","port":5432}' \
+    | leakpeek --fix --format-aware --quiet
+{"db_password":"[REDACTED-SECRET]","port":5432}
+
+# .env: KEY= and quotes and trailing comments survive; only the value goes.
+$ printf 'export TOKEN="sk-proj-abcdef0123456789abcdef"  # prod\nDEBUG=true\n' \
+    | leakpeek --fix --format-aware --quiet
+export TOKEN="[REDACTED-SECRET]"  # prod
+DEBUG=true
+
+# YAML: indentation and list structure kept.
+$ printf 'db:\n  password: AKIAIOSFODNN7EXAMPLE\n  port: 5432\n' \
+    | leakpeek --fix --format-aware --quiet
+db:
+  password: [REDACTED-SECRET]
+  port: 5432
+```
+
+It only redacts values a detector actually fires inside (so `port: 5432` is left alone), never touches keys (a secret-shaped key stays put), and falls back to normal span-based redaction for plain text or for a secret hiding somewhere the format pass doesn't model (like a comment). It composes with every strategy — `--format-aware --strategy hash` gives you `[SECRET:<8hex>]` inside the preserved structure.
+
 ## Quick idea of the interface (planned)
 
 ```bash
@@ -242,6 +271,7 @@ leakpeek --fix      # put a redacted copy back on the clipboard               (l
 cat x | leakpeek --fix   # ...or print the redacted text to stdout for a pipe (live)
 leakpeek --fix --strategy full|hash   # pick a redaction style                (live)
 leakpeek --fix --strategy vault   # reversible: swap in restorable placeholders (live)
+leakpeek --fix --format-aware   # JSON/YAML/.env: redact values, keep the shape  (live)
 leakpeek --unredact   # restore secrets in an AI reply that echoed placeholders (live)
 leakpeek --vault-clear   # forget the stored reversible-redaction session       (live)
 leakpeek --rules ./rules   # load custom detectors from TOML                  (live)

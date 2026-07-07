@@ -1,0 +1,198 @@
+#!/bin/sh
+# leakpeek-guard — a pre-paste hook for local AI CLIs.
+#
+# It frisks a prompt on stdin with leakpeek BEFORE the prompt reaches a tool
+# like `llm`, `aichat`, or `ollama run`. Depending on the policy it will block
+# the send, quietly redact the secrets, or just warn — then it runs the AI CLI
+# you wrapped, feeding it the (possibly redacted) prompt on stdin.
+#
+# It is a thin, dependency-free POSIX-sh wrapper around leakpeek's existing
+# stdin/pipe contract:
+#   - `leakpeek --stdin`         → scans, exits 3 when it finds something
+#   - `leakpeek --stdin --fix`   → prints a redacted copy to stdout
+# Nothing is stored; the prompt only ever lives in memory and a private temp
+# file that is shredded on exit. leakpeek never phones home, and neither does
+# this wrapper.
+#
+# ---------------------------------------------------------------------------
+# Usage
+#
+#   printf '%s' "$PROMPT" | leakpeek-guard [guard-flags] -- <ai-cli> [args...]
+#
+# Everything after the `--` is the command to run if the prompt clears the
+# policy. The prompt is piped to that command's stdin. Examples:
+#
+#   echo "summarize this: $(cat log.txt)" | leakpeek-guard -- llm
+#   pbpaste | leakpeek-guard --policy redact -- aichat
+#   cat prompt.txt | leakpeek-guard -- ollama run llama3
+#
+# Or wrap it once as a shell function (see the README) so `ai "..."` is guarded.
+#
+# ---------------------------------------------------------------------------
+# Policies (choose with --policy NAME or the LEAKPEEK_POLICY env var)
+#
+#   block   (default) If any secret is found, print the report and REFUSE to
+#           run the AI CLI. Exit 3. Nothing sensitive leaves your machine.
+#   redact  Scrub the secrets and send the redacted prompt to the AI CLI.
+#           A short note goes to stderr so you know it happened.
+#   warn    Warn on stderr about what was found, but send the ORIGINAL prompt
+#           through anyway. (You saw the risk and accepted it.)
+#   off     Do nothing; pass the prompt straight through. An escape hatch for
+#           when you trust the input and just want the wrapper out of the way.
+#
+# Flags:
+#   --policy NAME     One of: block | redact | warn | off. (Default: block.)
+#   --strategy NAME   Redaction strategy passed to leakpeek for --policy redact
+#                     (shape | full | hash | vault). Default: leakpeek's own.
+#   --rules PATH      Extra leakpeek rules (file or dir of *.toml) to load.
+#   --leakpeek BIN    Path/name of the leakpeek binary (default: leakpeek, or
+#                     the LEAKPEEK_BIN env var).
+#   --quiet           Suppress the wrapper's own status chatter on stderr.
+#                     (leakpeek's findings report is still shown on a block.)
+#   -h, --help        Show this help and exit.
+#
+# Exit codes mirror the situation so you can script around it:
+#   0  prompt cleared the policy (or was clean); the AI CLI's own exit code is
+#      passed through when it runs
+#   2  bad usage (missing `--`, unknown flag, etc.)
+#   3  BLOCKED: secrets were found under --policy block; the AI CLI did not run
+#   *  otherwise, the wrapped AI CLI's exit code
+
+set -eu
+
+prog=leakpeek-guard
+
+# ---- defaults (env overridable) -------------------------------------------
+policy=${LEAKPEEK_POLICY:-block}
+leakpeek_bin=${LEAKPEEK_BIN:-leakpeek}
+strategy=""
+rules=""
+quiet=0
+
+note() { [ "$quiet" -eq 1 ] || printf '%s\n' "$*" >&2; }
+die()  { printf '%s: %s\n' "$prog" "$*" >&2; exit 2; }
+
+usage() {
+	# Print the leading comment block (the docs above) as help text.
+	sed -n '2,/^set -eu$/{ /^set -eu$/d; s/^# \{0,1\}//; p; }' "$0"
+}
+
+# ---- parse guard flags up to the `--` separator ----------------------------
+have_sep=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--) have_sep=1; shift; break ;;
+		--policy)   [ $# -ge 2 ] || die "--policy needs a value"; policy=$2; shift 2 ;;
+		--policy=*) policy=${1#*=}; shift ;;
+		--strategy)   [ $# -ge 2 ] || die "--strategy needs a value"; strategy=$2; shift 2 ;;
+		--strategy=*) strategy=${1#*=}; shift ;;
+		--rules)   [ $# -ge 2 ] || die "--rules needs a value"; rules=$2; shift 2 ;;
+		--rules=*) rules=${1#*=}; shift ;;
+		--leakpeek)   [ $# -ge 2 ] || die "--leakpeek needs a value"; leakpeek_bin=$2; shift 2 ;;
+		--leakpeek=*) leakpeek_bin=${1#*=}; shift ;;
+		--quiet) quiet=1; shift ;;
+		-h|--help) usage; exit 0 ;;
+		-*) die "unknown flag: $1 (did you forget '--' before the AI command?)" ;;
+		*)  die "unexpected argument '$1' before '--' (put the AI command after '--')" ;;
+	esac
+done
+
+case "$policy" in
+	block|redact|warn|off) ;;
+	*) die "unknown --policy '$policy' (want block|redact|warn|off)" ;;
+esac
+
+if [ "$have_sep" -ne 1 ]; then
+	die "missing '--': usage is '... | $prog [flags] -- <ai-cli> [args...]'"
+fi
+if [ "$policy" != "off" ] && ! command -v "$leakpeek_bin" >/dev/null 2>&1; then
+	die "leakpeek binary '$leakpeek_bin' not found on PATH (set --leakpeek or \$LEAKPEEK_BIN)"
+fi
+
+# The remaining args are the AI command to run. At least one is required unless
+# we're only inspecting (there's nothing to hand the prompt to otherwise).
+if [ "$#" -eq 0 ]; then
+	die "no command after '--' to run (e.g. '-- llm' or '-- ollama run llama3')"
+fi
+
+# ---- slurp the prompt from stdin into a private temp file ------------------
+# We buffer it because we may need to read it twice (scan, then send) and a
+# pipe is single-shot. The temp file is created with a restrictive umask and
+# removed on any exit so the prompt never lingers on disk.
+umask 077
+tmp=$(mktemp "${TMPDIR:-/tmp}/leakpeek-guard.XXXXXX") || die "could not create temp file"
+# shellcheck disable=SC2317  # invoked indirectly via trap
+cleanup() { rm -f "$tmp" "$tmp.red" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+cat > "$tmp"
+
+# ---- off: shortest path, no scan ------------------------------------------
+if [ "$policy" = "off" ]; then
+	exec "$@" < "$tmp"
+fi
+
+# ---- build leakpeek's common args -----------------------------------------
+# We keep leakpeek quiet so its report only appears when WE decide to show it.
+set -- "$@"  # (no-op; keeps positional params = the AI command)
+lp_common="--stdin --quiet"
+[ -n "$rules" ] && lp_common="$lp_common --rules $rules"
+
+# Detect first (single scan) so we know whether anything was found. leakpeek
+# exits 3 on a hit, 0 when clean, 1/2 on error. `set -e` is relaxed here so we
+# can branch on the code instead of aborting.
+set +e
+# shellcheck disable=SC2086
+"$leakpeek_bin" $lp_common < "$tmp" >/dev/null 2>&1
+scan_rc=$?
+set -e
+
+case "$scan_rc" in
+	0) : ;;              # clean
+	3) : ;;              # found something
+	*) die "leakpeek failed while scanning the prompt (exit $scan_rc)" ;;
+esac
+
+# Clean prompt: nothing to do, just run the AI CLI with the original text.
+if [ "$scan_rc" -eq 0 ]; then
+	note "🔎 leakpeek: prompt is clean — sending it on."
+	exec "$@" < "$tmp"
+fi
+
+# ---- a secret was found: apply the policy ---------------------------------
+case "$policy" in
+	block)
+		# Show leakpeek's own findings report (to stderr) so the user sees what
+		# tripped the wire, then refuse to run the AI CLI.
+		# shellcheck disable=SC2086
+		"$leakpeek_bin" $lp_common < "$tmp" 1>&2 2>&1 || true
+		note "🚫 $prog: blocked — the prompt contains secrets and was NOT sent."
+		note "   Fix the prompt, or re-run with --policy redact to send a scrubbed copy."
+		exit 3
+		;;
+	warn)
+		# Show what was found but send the ORIGINAL prompt through unchanged.
+		# shellcheck disable=SC2086
+		"$leakpeek_bin" $lp_common < "$tmp" 1>&2 2>&1 || true
+		note "⚠️  $prog: secrets found but --policy warn — sending the ORIGINAL prompt anyway."
+		exec "$@" < "$tmp"
+		;;
+	redact)
+		# Produce a redacted copy on stdout and hand THAT to the AI CLI. Report
+		# goes to stderr so it never contaminates the redacted payload.
+		lp_fix="$lp_common --fix"
+		[ -n "$strategy" ] && lp_fix="$lp_fix --strategy $strategy"
+		set +e
+		# shellcheck disable=SC2086
+		"$leakpeek_bin" $lp_fix < "$tmp" > "$tmp.red" 2>/dev/null
+		fix_rc=$?
+		set -e
+		if [ "$fix_rc" -ne 0 ] && [ "$fix_rc" -ne 3 ]; then
+			die "leakpeek failed while redacting the prompt (exit $fix_rc)"
+		fi
+		note "✂️  $prog: secrets found — sending a REDACTED prompt instead of the original."
+		exec "$@" < "$tmp.red"
+		;;
+esac
+
+# Unreachable, but keep the shell honest.
+die "internal error: unhandled policy '$policy'"

@@ -44,6 +44,8 @@ The guarantee: for every strategy and every detector, the redacted output contai
 
 **Watch mode (`--watch`) is in:** leakpeek can now stand guard *continuously*. `leakpeek --watch` stays resident, taps the clipboard on a debounced interval (`--interval`, default `800ms`), and the instant a secret lands on it — before you ever reach the prompt box — it raises a **desktop notification** (`notify-send` / `osascript` / a PowerShell toast, best-effort per OS) and rings the **terminal bell**, plus a one-line stderr alert like `🚫 21:47:49  1 secret (secret) on your clipboard — don't paste that.` It's the doorman that never clocks out. True to the [out-of-scope rules](./PLAN.md#9-out-of-scope), it is **not** a clipboard manager: it stores nothing but an in-memory *hash* of the last value it saw (so it can tell "changed" from "polled again" without ever retaining your clipboard), never phones home, and forgets everything on exit. It's opt-in and stops on `Ctrl-C`; if the host has no clipboard tool at all it fails fast with one clear message instead of looping, and a *transient* read hiccup is logged once (not per tick) while it keeps trying. The polling loop itself is pure and fully unit-tested with a fake clock and clipboard.
 
+**AI-CLI pre-paste hook is in:** the guard now reaches the prompts you fire straight from the terminal into a local model. [`scripts/leakpeek-guard`](./scripts/leakpeek-guard) is a dependency-free POSIX-sh wrapper that frisks a prompt on stdin *before* it reaches `llm`, `aichat`, `ollama run`, or any other stdin-reading AI CLI, and enforces a **block-or-redact policy**: `block` (default) refuses to run the tool and exits `3` when a secret is present, `redact` sends a scrubbed copy instead, `warn` forwards the original but flags it, and `off` is a pass-through escape hatch. Everything after `--` is the command it guards (`… | leakpeek-guard -- ollama run llama3`), so it drops into a shell function in one line. It adds no detection logic of its own — it rides leakpeek's existing `--stdin`/`--fix` contract and inherits `--rules`/`--strategy` — buffers the prompt only in a `umask 077` temp file that's shredded on exit, and never phones home. Ten scenarios are covered by an integration test that drives the real script against a freshly built binary. This is the [Git pre-paste hook for AI CLIs](./PLAN.md#8-backlog--future-features-v02) item from the backlog.
+
 ## Build & run (from source)
 
 ```bash
@@ -260,6 +262,37 @@ db:
 
 It only redacts values a detector actually fires inside (so `port: 5432` is left alone), never touches keys (a secret-shaped key stays put), and falls back to normal span-based redaction for plain text or for a secret hiding somewhere the format pass doesn't model (like a comment). It composes with every strategy — `--format-aware --strategy hash` gives you `[SECRET:<8hex>]` inside the preserved structure.
 
+## Guard your AI CLIs (pre-paste hook)
+
+The most dangerous paste isn't into a chat *window* — it's the prompt you fire straight from your terminal into a local model with `llm`, `aichat`, or `ollama run`. `scripts/leakpeek-guard` is a tiny, dependency-free POSIX-sh wrapper that frisks that prompt on its way through and enforces a **block-or-redact policy** before a single byte reaches the model:
+
+```bash
+# Everything after `--` is the AI CLI to run; the prompt is piped to its stdin.
+echo "why does this fail: $(cat error.log)" | scripts/leakpeek-guard -- llm
+pbpaste | scripts/leakpeek-guard --policy redact -- aichat
+cat prompt.txt | scripts/leakpeek-guard -- ollama run llama3
+```
+
+Pick a policy with `--policy` (or the `LEAKPEEK_POLICY` env var):
+
+| Policy | What it does |
+| --- | --- |
+| `block` *(default)* | If a secret is found, print the findings and **refuse** to run the AI CLI (exit `3`). Nothing sensitive leaves the box. |
+| `redact` | Scrub the secrets and send the AI CLI a **redacted** prompt instead of the original. |
+| `warn` | Show what was found but send the **original** prompt through anyway. |
+| `off` | Do nothing; pass the prompt straight through. An escape hatch (doesn't even need leakpeek installed). |
+
+Wire it into your shell so guarding is the default, not a thing you remember to do. Drop this in your `.bashrc`/`.zshrc`:
+
+```bash
+# Guarded wrappers: block secrets by default, or set LEAKPEEK_POLICY=redact.
+ask()  { printf '%s' "$*" | leakpeek-guard -- llm; }              # ask "..."
+achat() { leakpeek-guard -- aichat; }                             # pipe or type
+oll()  { printf '%s' "$*" | leakpeek-guard -- ollama run llama3; } # oll "..."
+```
+
+Under the hood it's just leakpeek's existing stdin contract — `leakpeek --stdin` to detect, `leakpeek --stdin --fix` to get a redacted copy on stdout — so the guard adds no new detection logic and inherits `--rules`, `--strategy`, and every detector you've configured. It buffers the prompt in a `umask 077` temp file that's shredded on exit, stores nothing else, and (like leakpeek) never phones home. Point it at a non-default binary with `--leakpeek /path` or `LEAKPEEK_BIN`; run `scripts/leakpeek-guard --help` for the full flag list.
+
 ## Quick idea of the interface (planned)
 
 ```bash
@@ -275,6 +308,14 @@ leakpeek --fix --format-aware   # JSON/YAML/.env: redact values, keep the shape 
 leakpeek --unredact   # restore secrets in an AI reply that echoed placeholders (live)
 leakpeek --vault-clear   # forget the stored reversible-redaction session       (live)
 leakpeek --rules ./rules   # load custom detectors from TOML                  (live)
+```
+
+Guard a local AI CLI (block or redact secrets before they reach the model):
+
+```bash
+echo "$PROMPT" | leakpeek-guard -- llm                 # block on a secret (default)
+cat prompt.txt | leakpeek-guard --policy redact -- aichat  # send a scrubbed copy
+pbpaste | leakpeek-guard -- ollama run llama3          # works with any stdin-reading CLI
 ```
 
 ## Not a clipboard manager

@@ -8,7 +8,9 @@
 // text to stdout so `cat secrets.env | leakpeek --fix > clean.env` works.
 // `--json` emits a machine-readable document; `--quiet` suppresses the report
 // on a clean scan. With `--watch`, leakpeek stays resident and taps the
-// clipboard on an interval, alerting the instant a secret lands on it.
+// clipboard on an interval, alerting the instant a secret lands on it. With
+// `--fix --format-aware`, redaction is structure-aware: for JSON/YAML/.env
+// input it scrubs the values that carry a secret and keeps keys and shape.
 //
 // The reversible vault closes the loop with an AI: `--fix --strategy vault`
 // swaps each secret for an opaque, restorable placeholder and remembers the
@@ -104,6 +106,10 @@ Flags:
   --no-vault         With --fix --strategy vault, do NOT persist the mapping
                      to disk. The redaction still works, but --unredact in a
                      later run won't be able to reverse it.
+  --format-aware     With --fix, redact structure-aware: for JSON/YAML/.env
+                     input, scrub the *values* that hold a secret and keep the
+                     keys and shape, so the AI still sees the structure. Falls
+                     back to normal redaction for plain text. (Aka --format.)
   --rules <path>     Load extra detectors from a TOML rule file or a directory
                      of *.toml files. Custom rules run alongside the built-ins.
   --json             Emit machine-readable JSON instead of the human report.
@@ -133,6 +139,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		vaultClear  bool
 		keepVault   bool
 		noVault     bool
+		formatAware bool
 	)
 
 	// Minimal stdlib-style flag parsing. We hand-roll it to keep the binary
@@ -165,6 +172,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			keepVault = true
 		case "--no-vault", "-no-vault":
 			noVault = true
+		case "--format-aware", "-format-aware", "--format", "-format":
+			formatAware = true
 		case "--watch", "-watch":
 			watchMode = true
 		case "--interval", "-interval":
@@ -307,7 +316,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// to avoid needlessly churning the clipboard on a clean scan. The human
 	// report then goes to stderr so it never contaminates piped stdout.
 	if fix {
-		return runFix(res, findings, text, strategy, piped, asJSON, quiet, noVault, stdout, stderr)
+		return runFix(res, findings, text, strategy, piped, asJSON, quiet, noVault, formatAware, stdout, stderr)
 	}
 
 	if asJSON {
@@ -423,14 +432,15 @@ func runFix(
 	findings []detect.Finding,
 	text string,
 	strategy redact.Strategy,
-	piped, asJSON, quiet, noVault bool,
+	piped, asJSON, quiet, noVault, formatAware bool,
 	stdout, stderr io.Writer,
 ) int {
 	var (
 		redacted  string
 		vaultSave *vault.Vault // non-nil only when we should persist a session
 	)
-	if strategy == redact.Vault {
+	switch {
+	case strategy == redact.Vault:
 		v := vault.New()
 		redacted = redact.RedactWithVault(text, findings, v)
 		// Only persist when we actually captured mappings and the user didn't
@@ -438,7 +448,13 @@ func runFix(
 		if !noVault && !v.Empty() {
 			vaultSave = v
 		}
-	} else {
+	case formatAware:
+		// Structure-preserving redaction: for JSON/YAML/.env input, scrub the
+		// values that carry a secret and leave keys/structure intact, so the AI
+		// still sees the shape. Falls back to span-based redaction for plain
+		// text (and for any finding outside a recognized value).
+		redacted = redact.FormatAwareOrPlain(text, findings, strategy)
+	default:
 		redacted = redact.Redact(text, findings, strategy)
 	}
 

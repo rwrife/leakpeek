@@ -151,8 +151,21 @@ func (w *Watcher) now() time.Time {
 // It runs the engine and reduces the findings to a total + distinct,
 // sorted-for-stability kind list. It never retains the scanned text.
 func EngineScan(engine *detect.Engine) func(string) ScanResult {
+	return EngineScanFiltered(engine, nil)
+}
+
+// EngineScanFiltered is EngineScan with an optional allowlist post-filter
+// applied to the engine's findings before they're summarized, so watch mode
+// honors the same .leakpeekignore suppression the one-shot scan does. A nil
+// filter means "no suppression" and behaves exactly like EngineScan. The
+// filter runs in-process on each tick and, like the rest of watch mode,
+// retains nothing beyond the summary it returns.
+func EngineScanFiltered(engine *detect.Engine, filter func([]detect.Finding) []detect.Finding) func(string) ScanResult {
 	return func(text string) ScanResult {
 		findings := engine.Scan(text)
+		if filter != nil {
+			findings = filter(findings)
+		}
 		return ScanResult{Total: len(findings), Kinds: distinctKinds(findings)}
 	}
 }

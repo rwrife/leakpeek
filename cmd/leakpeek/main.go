@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rwrife/leakpeek/internal/allow"
 	"github.com/rwrife/leakpeek/internal/clipboard"
 	"github.com/rwrife/leakpeek/internal/detect"
 	"github.com/rwrife/leakpeek/internal/notify"
@@ -112,6 +113,11 @@ Flags:
                      back to normal redaction for plain text. (Aka --format.)
   --rules <path>     Load extra detectors from a TOML rule file or a directory
                      of *.toml files. Custom rules run alongside the built-ins.
+  --ignore <path>    Load allowlist entries from an ignore file (repeatable).
+                     Layered on top of any discovered .leakpeekignore files;
+                     honored even with --no-ignore.
+  --no-ignore        Don't auto-discover .leakpeekignore / global ignore files
+                     for this run. Explicit --ignore paths still apply.
   --json             Emit machine-readable JSON instead of the human report.
   --quiet            Print nothing on a clean scan (still reports on a hit).
   --stdin            Read text from stdin instead of the clipboard.
@@ -133,6 +139,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fix         bool
 		strategy    = redact.Shape
 		rulesPath   string
+		ignorePaths []string
+		noIgnore    bool
 		watchMode   bool
 		interval    time.Duration
 		unredact    bool
@@ -232,6 +240,28 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				return exitUsage
 			}
 			rulesPath = val
+		case "--ignore", "-ignore":
+			val := inlineVal
+			if !hasInline {
+				// Consume the following argument as the path.
+				if i+1 >= len(args) {
+					fmt.Fprintf(stderr, "leakpeek: --ignore needs a path to an ignore file\n\n")
+					fmt.Fprintf(stderr, usage, version, exitFound, exitClean)
+					return exitUsage
+				}
+				i++
+				val = args[i]
+			}
+			if strings.TrimSpace(val) == "" {
+				fmt.Fprintf(stderr, "leakpeek: --ignore path must not be empty\n\n")
+				fmt.Fprintf(stderr, usage, version, exitFound, exitClean)
+				return exitUsage
+			}
+			// --ignore is repeatable: every path is loaded and merged, so a
+			// user can layer a scratch allowlist on top of their project one.
+			ignorePaths = append(ignorePaths, val)
+		case "--no-ignore", "-no-ignore":
+			noIgnore = true
 		case "-h", "--help", "-help":
 			fmt.Fprintf(stdout, usage, version, exitFound, exitClean)
 			return exitClean
@@ -273,10 +303,36 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		engine = engine.WithDetectors(custom...)
 	}
 
+	// Build the allowlist (PLAN.md §8.2): a post-detection filter that drops
+	// findings the user marked known-safe. Unless --no-ignore is set, we
+	// discover .leakpeekignore files by walking up from cwd and merge the
+	// global config-dir ignore; explicit --ignore paths are layered on top and
+	// are always honored even with --no-ignore (an explicit path is an explicit
+	// request). A present-but-broken ignore file is an operational error (exit
+	// 1), reported before we scan so the user knows their allowlist never
+	// loaded rather than silently failing open.
+	var allowSet allow.Set
+	if !noIgnore {
+		discovered, err := allow.Discover("")
+		if err != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
+		allowSet = discovered
+	}
+	if len(ignorePaths) > 0 {
+		explicit, err := allow.LoadFiles(ignorePaths)
+		if err != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
+		allowSet = allowSet.Merge(explicit)
+	}
+
 	// --watch: hand off to the resident clipboard watcher. It owns its own
 	// read loop, so none of the one-shot input/report machinery below runs.
 	if watchMode {
-		return runWatch(engine, interval, stderr)
+		return runWatch(engine, allowSet, interval, stderr)
 	}
 
 	// --unredact is the reverse of --fix --strategy vault: it reads the AI's
@@ -307,7 +363,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// Frisk it.
 	findings := engine.Scan(text)
-	res := report.Build(text, findings)
+	// Allowlist post-filter: drop known-safe findings before anything reports
+	// or redacts them, so a suppressed token is neither counted nor scrubbed by
+	// --fix. ignored feeds the report's suppression footer / --json count.
+	findings, ignored := allowSet.Filter(findings)
+	res := report.Build(text, findings, ignored)
 
 	// --fix: redact and hand back a safe copy. When the input came from a
 	// pipe we print the (possibly unchanged) redacted text to stdout so the
@@ -344,9 +404,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 //
 // stderr is used for all human output so that, even under --watch, stdout
 // stays clean for any future piping and the alerts never race with a report.
-func runWatch(engine *detect.Engine, interval time.Duration, stderr io.Writer) int {
+func runWatch(engine *detect.Engine, allowSet allow.Set, interval time.Duration, stderr io.Writer) int {
 	iv := watch.NormalizeInterval(interval)
 
+	// Adapt the allowlist into the filter shape the watcher expects: drop the
+	// suppressed-count (watch mode's per-hit alert doesn't surface it) and keep
+	// only the survivors, so an allowlisted token never triggers a watch alert.
+	var filter func([]detect.Finding) []detect.Finding
+	if !allowSet.Empty() {
+		filter = func(fs []detect.Finding) []detect.Finding {
+			kept, _ := allowSet.Filter(fs)
+			return kept
+		}
+	}
 	// Fail fast when the host has no clipboard tool at all: there's nothing to
 	// watch, and looping would just spam the same error forever. A transient
 	// read failure (tool present but momentarily broken) is NOT fatal here —
@@ -373,7 +443,7 @@ func runWatch(engine *detect.Engine, interval time.Duration, stderr io.Writer) i
 
 	w := &watch.Watcher{
 		Read:     clipboard.Read,
-		Scan:     watch.EngineScan(engine),
+		Scan:     watch.EngineScanFiltered(engine, filter),
 		Interval: iv,
 		Notify: func(total int, kinds []string) {
 			title, body := notify.Message(total, kinds)

@@ -205,6 +205,59 @@ Notes:
 
 A starter file lives at [`rules/example.toml`](./rules/example.toml).
 
+## Allowlist (`.leakpeekignore`)
+
+leakpeek is a frisker, but some tokens are *known-safe* and firing on them every
+paste is noise: public sandbox keys (`pk_test_…`), documented example IPs
+(`192.0.2.0/24`), placeholder emails (`user@example.com`). An allowlist lets you
+say "yes, I know, shut up about this one" without disabling a whole detector.
+
+Drop a `.leakpeekignore` file in your project. leakpeek discovers it by walking
+**up from the current directory** (like `.gitignore`, nearest wins) and also
+merges a global file at `$XDG_CONFIG_HOME/leakpeek/ignore` (falling back to
+`~/.config/leakpeek/ignore`). The upward walk stops at the repo root so it never
+inherits a stranger's config.
+
+```gitignore
+# .leakpeekignore — one entry per line. '#' comments and blank lines are ignored.
+
+user@example.com                 # literal: suppress this exact token
+203.0.113.5                      # a documented example IP
+
+/^pk_test_[A-Za-z0-9]+$/         # /regex/: suppress any Stripe test key
+/^AKIA[0-9A-Z]{16}$/             # …or any AKIA-shaped key you know is a sample
+```
+
+Two entry forms:
+
+- **Literal** — an exact token string. A finding whose match equals it verbatim
+  is dropped.
+- **Regex** — a line wrapped in `/…/` compiles as a Go/[RE2](https://github.com/google/re2/wiki/Syntax)
+  pattern and is anchored to the **whole** match, so it can never suppress a mere
+  substring of a longer secret (false negatives stay predictable).
+
+Suppression is a pure post-filter: it happens **after** detection and **before**
+the report or `--fix`, so an allowlisted token is never counted, never printed,
+and never redacted (a `--fix` copy leaves it verbatim). If the *only* findings
+were suppressed, leakpeek exits with the clean code, so it still composes in
+shell aliases and CI.
+
+```bash
+cat .env | leakpeek --stdin                 # auto-discovers .leakpeekignore
+leakpeek --ignore ./ci.leakpeekignore       # add an explicit file (repeatable)
+leakpeek --no-ignore                        # ignore all discovery for this run
+```
+
+- `--ignore <path>` layers an extra ignore file on top of discovery, and is
+  repeatable. It's honored even with `--no-ignore` (an explicit path is an
+  explicit request).
+- `--no-ignore` turns off `.leakpeekignore` / global discovery for the run.
+- `--json` output gains a top-level `ignored` count; the human report prints a
+  dim `(N suppressed by .leakpeekignore)` footer only when `N > 0`.
+- A present-but-malformed ignore file (e.g. a broken regex) fails loudly with a
+  `file:line` diagnostic (exit `1`) rather than silently letting a secret
+  through.
+
 ## Reversible redaction (un-redact an AI's reply)
 
 Sometimes you don't just want to *hide* a secret — you want the AI's answer to still make sense when it hands your placeholder back. The `vault` strategy makes redaction reversible:
@@ -308,6 +361,7 @@ leakpeek --fix --format-aware   # JSON/YAML/.env: redact values, keep the shape 
 leakpeek --unredact   # restore secrets in an AI reply that echoed placeholders (live)
 leakpeek --vault-clear   # forget the stored reversible-redaction session       (live)
 leakpeek --rules ./rules   # load custom detectors from TOML                  (live)
+leakpeek --ignore f.txt   # allowlist known-safe tokens (.leakpeekignore)     (live)
 ```
 
 Guard a local AI CLI (block or redact secrets before they reach the model):

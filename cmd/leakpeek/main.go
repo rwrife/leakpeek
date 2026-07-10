@@ -118,6 +118,13 @@ Flags:
                      honored even with --no-ignore.
   --no-ignore        Don't auto-discover .leakpeekignore / global ignore files
                      for this run. Explicit --ignore paths still apply.
+  --strict           Paranoid entropy tuning: flag more generic high-entropy
+                     tokens (lower entropy floor). Best before pasting into a
+                     public forum. Mutually exclusive with --chill.
+  --chill            Relaxed entropy tuning: flag fewer generic tokens (higher
+                     floor) and drop bare internal-IP hits. Best for trusted
+                     internal chats. Mutually exclusive with --strict.
+                     Default (neither flag) keeps the balanced tuning.
   --json             Emit machine-readable JSON instead of the human report.
   --quiet            Print nothing on a clean scan (still reports on a hit).
   --stdin            Read text from stdin instead of the clipboard.
@@ -127,6 +134,20 @@ Flags:
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+// dropKind returns findings with every entry of the given kind removed. It
+// backs --chill's default suppression of bare network (IPv4) hits without
+// mutating the input slice.
+func dropKind(findings []detect.Finding, kind detect.Kind) []detect.Finding {
+	out := findings[:0:0]
+	for _, f := range findings {
+		if f.Kind == kind {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 // run is the testable entry point. It returns the process exit code.
@@ -148,6 +169,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		keepVault   bool
 		noVault     bool
 		formatAware bool
+		strict      bool
+		chill       bool
 	)
 
 	// Minimal stdlib-style flag parsing. We hand-roll it to keep the binary
@@ -182,6 +205,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			noVault = true
 		case "--format-aware", "-format-aware", "--format", "-format":
 			formatAware = true
+		case "--strict", "-strict":
+			strict = true
+		case "--chill", "-chill":
+			chill = true
 		case "--watch", "-watch":
 			watchMode = true
 		case "--interval", "-interval":
@@ -293,7 +320,27 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// before we scan so the user knows their rules never loaded. The engine is
 	// built before we touch any input because --watch never reads a one-shot
 	// input at all — it polls the clipboard on its own schedule.
-	engine := detect.Default()
+	// Resolve the entropy sensitivity profile from --strict / --chill. The two
+	// are mutually exclusive named dials over the generic high-entropy gate;
+	// passing both is a usage error. Only the entropy detector's thresholds
+	// change — structured detectors are identical across all three profiles.
+	// --chill additionally suppresses bare-IP (KindNetwork) findings, since
+	// internal IPs are the most common low-value hit.
+	if strict && chill {
+		fmt.Fprintf(stderr, "leakpeek: --strict and --chill are mutually exclusive; pick one\n\n")
+		fmt.Fprintf(stderr, usage, version, exitFound, exitClean)
+		return exitUsage
+	}
+	profile := detect.ProfileDefault
+	profileName := "default"
+	switch {
+	case strict:
+		profile, profileName = detect.ProfileStrict, "strict"
+	case chill:
+		profile, profileName = detect.ProfileChill, "chill"
+	}
+
+	engine := detect.DefaultProfile(profile)
 	if rulesPath != "" {
 		custom, err := rules.LoadPath(rulesPath)
 		if err != nil {
@@ -363,11 +410,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// Frisk it.
 	findings := engine.Scan(text)
+	// --chill suppresses bare network (IPv4) findings by default: internal IPs
+	// are the most common "meh" hit, and a relaxed run shouldn't nag about
+	// them. Structured secrets are untouched. (#22 allowlist work can later
+	// override this per-value.)
+	if chill {
+		findings = dropKind(findings, detect.KindNetwork)
+	}
 	// Allowlist post-filter: drop known-safe findings before anything reports
 	// or redacts them, so a suppressed token is neither counted nor scrubbed by
 	// --fix. ignored feeds the report's suppression footer / --json count.
 	findings, ignored := allowSet.Filter(findings)
 	res := report.Build(text, findings, ignored)
+	res.Profile = profileName
 
 	// --fix: redact and hand back a safe copy. When the input came from a
 	// pipe we print the (possibly unchanged) redacted text to stdout so the

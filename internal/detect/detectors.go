@@ -10,6 +10,15 @@ import "regexp"
 // before the broad generic-entropy catch-all, so a real AWS key is reported
 // as "aws-access-key" rather than the generic "high-entropy-token".
 func DefaultDetectors() []Detector {
+	return DefaultDetectorsProfile(ProfileDefault)
+}
+
+// DefaultDetectorsProfile is DefaultDetectors with the generic high-entropy
+// catch-all tuned to the given profile. Only the entropy detector's gate
+// changes; every structured detector (aws-access-key, github-pat, jwt,
+// private-key, email, ipv4) is identical across profiles — a real key is a
+// real key regardless of the sensitivity dial.
+func DefaultDetectorsProfile(p EntropyProfile) []Detector {
 	return []Detector{
 		awsAccessKey,
 		openAIKey,
@@ -19,7 +28,7 @@ func DefaultDetectors() []Detector {
 		privateKey,
 		email,
 		ipv4,
-		highEntropyToken, // broad catch-all, registered last on purpose
+		entropyDetector(p), // broad catch-all, registered last on purpose
 	}
 }
 
@@ -138,6 +147,22 @@ var highEntropyToken = regexDetector{
 	kind:     KindEntropy,
 	re:       regexp.MustCompile(`[A-Za-z0-9+/_-]{20,}={0,2}`),
 	validate: looksHighEntropy,
+}
+
+// entropyDetector builds the generic high-entropy catch-all with its gate
+// bound to a specific profile. The default detector (highEntropyToken) is the
+// p == ProfileDefault case; this constructor is what --strict / --chill use to
+// swap in a more- or less-sensitive gate without touching any other detector.
+func entropyDetector(p EntropyProfile) regexDetector {
+	if p == ProfileDefault {
+		return highEntropyToken // preserve the exact default instance
+	}
+	return regexDetector{
+		name:     "high-entropy-token",
+		kind:     KindEntropy,
+		re:       highEntropyToken.re,
+		validate: p.accepts,
+	}
 }
 
 // validIPv4 confirms each dotted octet is 0–255, rejecting things like

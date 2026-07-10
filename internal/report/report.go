@@ -52,8 +52,9 @@ type Group struct {
 // Result is the prepared, render-ready view of a scan. Build it once with
 // Build, then hand it to Render or RenderJSON.
 type Result struct {
-	Total   int     `json:"total"` // total number of findings
-	Clean   bool    `json:"clean"` // true when Total == 0
+	Total   int     `json:"total"`   // total number of findings (after allowlist)
+	Clean   bool    `json:"clean"`   // true when Total == 0
+	Ignored int     `json:"ignored"` // findings suppressed by the allowlist
 	Items   []Item  `json:"findings"`
 	Groups  []Group `json:"groups"`
 	Verdict string  `json:"verdict"` // the one-line personality summary
@@ -62,8 +63,11 @@ type Result struct {
 // Build maps raw findings against the scanned text into a Result: it computes
 // line/column, masks each preview, groups by detector, and composes the
 // verdict line. text must be the exact string that was scanned so byte
-// offsets line up.
-func Build(text string, findings []detect.Finding) Result {
+// offsets line up. The findings passed here are the ones that survived any
+// allowlist; ignored is how many were suppressed before this call, carried
+// through so --json and the human footer can report the suppression count
+// without re-running the filter.
+func Build(text string, findings []detect.Finding, ignored int) Result {
 	lines := newLineIndex(text)
 
 	items := make([]Item, 0, len(findings))
@@ -81,10 +85,11 @@ func Build(text string, findings []detect.Finding) Result {
 	}
 
 	res := Result{
-		Total:  len(items),
-		Clean:  len(items) == 0,
-		Items:  items,
-		Groups: group(items),
+		Total:   len(items),
+		Clean:   len(items) == 0,
+		Ignored: ignored,
+		Items:   items,
+		Groups:  group(items),
 	}
 	res.Verdict = verdict(res)
 	return res
@@ -131,6 +136,7 @@ func Render(w io.Writer, res Result, quiet bool) {
 			return
 		}
 		fmt.Fprintln(w, res.Verdict)
+		writeSuppressedFooter(w, res.Ignored)
 		return
 	}
 
@@ -144,6 +150,22 @@ func Render(w io.Writer, res Result, quiet bool) {
 	writeTable(w, rows)
 
 	fmt.Fprintln(w, res.Verdict)
+	writeSuppressedFooter(w, res.Ignored)
+}
+
+// writeSuppressedFooter prints the dim allowlist footer, but only when at
+// least one finding was suppressed. It's shown on both clean and dirty scans
+// so a user always knows the allowlist did something ("why did nothing fire?
+// — oh, 2 suppressed"). n <= 0 prints nothing.
+func writeSuppressedFooter(w io.Writer, n int) {
+	if n <= 0 {
+		return
+	}
+	noun := "finding"
+	if n != 1 {
+		noun = "findings"
+	}
+	fmt.Fprintf(w, "   (%d %s suppressed by .leakpeekignore)\n", n, noun)
 }
 
 // row is a single rendered table line (pre-formatting), kept as columns so we

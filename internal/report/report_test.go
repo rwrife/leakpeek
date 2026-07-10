@@ -27,7 +27,7 @@ func TestBuildComputesLineAndColumn(t *testing.T) {
 	end := start + len("AKIAIOSFODNN7EXAMPLE")
 	f := mkFinding(text, "aws-access-key", detect.KindSecret, start, end)
 
-	res := Build(text, []detect.Finding{f})
+	res := Build(text, []detect.Finding{f}, 0)
 	if res.Total != 1 || res.Clean {
 		t.Fatalf("total/clean = %d/%v, want 1/false", res.Total, res.Clean)
 	}
@@ -50,7 +50,7 @@ func TestBuildColumnCountsRunesNotBytes(t *testing.T) {
 	end := len(text)
 	f := mkFinding(text, "email", detect.KindPII, start, end)
 
-	res := Build(text, []detect.Finding{f})
+	res := Build(text, []detect.Finding{f}, 0)
 	it := res.Items[0]
 	if it.Line != 1 {
 		t.Fatalf("line = %d, want 1", it.Line)
@@ -67,7 +67,7 @@ func TestBuildGroupsByDetector(t *testing.T) {
 	f2 := mkFinding(text, "email", detect.KindPII, 8, 15)
 	f3 := mkFinding(text, "ipv4", detect.KindNetwork, 16, 24)
 
-	res := Build(text, []detect.Finding{f1, f2, f3})
+	res := Build(text, []detect.Finding{f1, f2, f3}, 0)
 	if len(res.Groups) != 2 {
 		t.Fatalf("group count = %d, want 2", len(res.Groups))
 	}
@@ -80,7 +80,7 @@ func TestBuildGroupsByDetector(t *testing.T) {
 }
 
 func TestBuildEmptyIsClean(t *testing.T) {
-	res := Build("nothing sensitive", nil)
+	res := Build("nothing sensitive", nil, 0)
 	if !res.Clean || res.Total != 0 {
 		t.Errorf("clean/total = %v/%d, want true/0", res.Clean, res.Total)
 	}
@@ -131,7 +131,7 @@ func TestMaskMultibyteSafe(t *testing.T) {
 }
 
 func TestRenderQuietCleanWritesNothing(t *testing.T) {
-	res := Build("all good", nil)
+	res := Build("all good", nil, 0)
 	var b bytes.Buffer
 	Render(&b, res, true)
 	if b.Len() != 0 {
@@ -140,7 +140,7 @@ func TestRenderQuietCleanWritesNothing(t *testing.T) {
 }
 
 func TestRenderCleanNotQuietWritesVerdict(t *testing.T) {
-	res := Build("all good", nil)
+	res := Build("all good", nil, 0)
 	var b bytes.Buffer
 	Render(&b, res, false)
 	if !strings.Contains(b.String(), "Clean") {
@@ -153,7 +153,7 @@ func TestRenderDirtyHasHeaderTableAndVerdict(t *testing.T) {
 	res := Build(text, []detect.Finding{
 		mkFinding(text, "email", detect.KindPII, 0, 7),
 		mkFinding(text, "email", detect.KindPII, 8, 15),
-	})
+	}, 0)
 	var b bytes.Buffer
 	Render(&b, res, false)
 	out := b.String()
@@ -168,7 +168,7 @@ func TestRenderJSONShape(t *testing.T) {
 	text := "AKIAIOSFODNN7EXAMPLE"
 	res := Build(text, []detect.Finding{
 		mkFinding(text, "aws-access-key", detect.KindSecret, 0, 20),
-	})
+	}, 0)
 	var b bytes.Buffer
 	if err := RenderJSON(&b, res); err != nil {
 		t.Fatalf("RenderJSON error: %v", err)

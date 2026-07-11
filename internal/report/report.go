@@ -52,9 +52,10 @@ type Group struct {
 // Result is the prepared, render-ready view of a scan. Build it once with
 // Build, then hand it to Render or RenderJSON.
 type Result struct {
-	Total   int     `json:"total"`   // total number of findings (after allowlist)
-	Clean   bool    `json:"clean"`   // true when Total == 0
-	Ignored int     `json:"ignored"` // findings suppressed by the allowlist
+	Total   int     `json:"total"`             // total number of findings (after allowlist)
+	Clean   bool    `json:"clean"`             // true when Total == 0
+	Ignored int     `json:"ignored"`           // findings suppressed by the allowlist
+	Profile string  `json:"profile,omitempty"` // active entropy sensitivity profile (chill|default|strict)
 	Items   []Item  `json:"findings"`
 	Groups  []Group `json:"groups"`
 	Verdict string  `json:"verdict"` // the one-line personality summary

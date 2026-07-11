@@ -82,6 +82,14 @@ func Default() *Engine {
 	return New(DefaultDetectors()...)
 }
 
+// DefaultProfile returns an Engine loaded with the core pack, with the generic
+// high-entropy detector tuned to the given sensitivity profile. All other
+// detectors are unchanged, so structured findings are identical across
+// profiles.
+func DefaultProfile(p EntropyProfile) *Engine {
+	return New(DefaultDetectorsProfile(p)...)
+}
+
 // Detectors exposes the engine's detector set (read-only use).
 func (e *Engine) Detectors() []Detector { return e.detectors }
 

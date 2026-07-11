@@ -32,10 +32,49 @@ func ShannonEntropy(s string) float64 {
 	return bits
 }
 
+// EntropyProfile bundles the two tunable knobs of the generic high-entropy
+// token gate: the minimum token length and the minimum Shannon entropy (in
+// bits per byte) a token must clear to be flagged as a random-looking
+// credential. Lower values are more sensitive (more hits, more false
+// positives); higher values are calmer (fewer hits). See PLAN.md §8.
+type EntropyProfile struct {
+	MinLen         int     // shorter tokens are never flagged generically
+	MinBitsPerChar float64 // bits/byte the token must reach to count
+}
+
+// The three named sensitivity presets exposed via --strict / --chill and the
+// default (no flag). ProfileDefault MUST hold the historical production
+// values so existing behavior — and every existing fixture test — is
+// byte-for-byte unchanged. strict lowers both dials (flags more); chill
+// raises both (flags fewer).
+var (
+	// ProfileStrict is the paranoid preset: catch more, tolerate more noise.
+	ProfileStrict = EntropyProfile{MinLen: 16, MinBitsPerChar: 3.0}
+	// ProfileDefault is the unchanged v0.1 production tuning.
+	ProfileDefault = EntropyProfile{MinLen: 20, MinBitsPerChar: 3.5}
+	// ProfileChill is the relaxed preset: fewer interruptions.
+	ProfileChill = EntropyProfile{MinLen: 28, MinBitsPerChar: 4.0}
+)
+
+// accepts reports whether tok clears this profile's length + entropy gate,
+// applying the same character-class sanity check the default gate always has
+// (see looksHighEntropy). It is the profile-aware core the entropy detector
+// uses; looksHighEntropy is the default-profile shorthand kept for callers
+// and tests that predate profiles.
+func (p EntropyProfile) accepts(tok string) bool {
+	if len(tok) < p.MinLen {
+		return false
+	}
+	if !mixedAlphabet(tok) {
+		return false // looks like a single-case word run, not a key
+	}
+	return ShannonEntropy(tok) >= p.MinBitsPerChar
+}
+
 // looksHighEntropy reports whether tok is long enough and random enough to
-// be a credential rather than an ordinary word. The thresholds are tuned for
-// the v0.1 generic-token detector: short or low-entropy strings are rejected
-// to keep false positives down (PLAN.md §8 adds tunable profiles later).
+// be a credential rather than an ordinary word, using the DEFAULT profile.
+// It is preserved as the zero-config entry point so the default detector and
+// existing tests keep their exact behavior.
 //
 // Plain English defeats a naive entropy gate (a 25-letter run of distinct
 // lowercase words can score ~4.2 bits), so we add a cheap character-class
@@ -43,17 +82,7 @@ func ShannonEntropy(s string) float64 {
 // whereas prose tokens are almost always a single case of letters. A token
 // drawn from just one letter case with no digits is treated as a word.
 func looksHighEntropy(tok string) bool {
-	const (
-		minLen     = 20  // shorter tokens are too noisy to flag generically
-		minEntropy = 3.5 // bits/byte; prose sits below this, keys above
-	)
-	if len(tok) < minLen {
-		return false
-	}
-	if !mixedAlphabet(tok) {
-		return false // looks like a single-case word run, not a key
-	}
-	return ShannonEntropy(tok) >= minEntropy
+	return ProfileDefault.accepts(tok)
 }
 
 // mixedAlphabet reports whether tok draws from more than one obvious symbol

@@ -258,6 +258,39 @@ leakpeek --no-ignore                        # ignore all discovery for this run
   `file:line` diagnostic (exit `1`) rather than silently letting a secret
   through.
 
+## Sensitivity levels (`--strict` / `--chill`)
+
+The specific detectors (AWS keys, GitHub PATs, JWTs, private keys, emails, IPs)
+are precise and never change — a real `sk-` key is always a real key. But the
+generic **high-entropy-token** catch-all is the classic double-edged sword:
+crank it up and every base64 blob or git SHA lights up; relax it and you miss
+real secrets. Instead of asking you to reason about Shannon bits, leakpeek gives
+you two named dials over that one detector:
+
+- **`--strict`** — paranoid. Lower entropy floor + shorter min length: flags
+  more generic tokens, tolerates more false positives. Use it *before pasting
+  into a public forum*.
+- **default** (no flag) — the balanced production tuning. Unchanged behavior.
+- **`--chill`** — relaxed. Higher entropy floor + longer min length, and it
+  **drops bare internal-IP (IPv4) findings** by default since those are the most
+  common low-value hit. Fewer interruptions. Use it for *trusted internal
+  chats*.
+
+`--strict` and `--chill` are mutually exclusive (passing both is a usage error,
+exit `2`). Only the entropy detector's thresholds move — structured detectors
+produce identical findings across all three levels. With `--json`, the active
+`profile` (`strict`/`default`/`chill`) is included so scripted runs are
+self-describing.
+
+```console
+$ printf 'internal box 10.0.4.7\n' | leakpeek --chill; echo exit=$?
+✅ Clean. Paste away.
+exit=0
+$ printf 'internal box 10.0.4.7\n' | leakpeek; echo exit=$?
+🚨 1 thing you'd regret. …
+exit=3
+```
+
 ## Reversible redaction (un-redact an AI's reply)
 
 Sometimes you don't just want to *hide* a secret — you want the AI's answer to still make sense when it hands your placeholder back. The `vault` strategy makes redaction reversible:

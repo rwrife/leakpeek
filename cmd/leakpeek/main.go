@@ -38,6 +38,7 @@ import (
 	"github.com/rwrife/leakpeek/internal/redact"
 	"github.com/rwrife/leakpeek/internal/report"
 	"github.com/rwrife/leakpeek/internal/rules"
+	"github.com/rwrife/leakpeek/internal/stats"
 	"github.com/rwrife/leakpeek/internal/vault"
 	"github.com/rwrife/leakpeek/internal/watch"
 )
@@ -125,6 +126,17 @@ Flags:
                      floor) and drop bare internal-IP hits. Best for trusted
                      internal chats. Mutually exclusive with --strict.
                      Default (neither flag) keeps the balanced tuning.
+  --stats            Print leakpeek's fully-local, opt-in leak counter (total
+                     stopped, this month, streak, top kinds) and exit. With
+                     --json, prints the raw stats object. Numbers never leave
+                     this machine.
+  --stats-record     Record this run into the local stats counter. Recording
+                     is otherwise off; enable it persistently with the env var
+                     LEAKPEEK_STATS=1. A run that stops >=1 leak counts as a
+                     stopped leak. Best-effort — never fails a scan.
+  --stats-reset      Zero the local stats counters (keeps the first-seen date)
+                     and exit.
+  --stats-clear      Delete the local stats file entirely and exit.
   --json             Emit machine-readable JSON instead of the human report.
   --quiet            Print nothing on a clean scan (still reports on a hit).
   --stdin            Read text from stdin instead of the clipboard.
@@ -171,6 +183,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		formatAware bool
 		strict      bool
 		chill       bool
+		showStats   bool
+		statsRecord bool
+		statsReset  bool
+		statsClear  bool
 	)
 
 	// Minimal stdlib-style flag parsing. We hand-roll it to keep the binary
@@ -209,6 +225,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			strict = true
 		case "--chill", "-chill":
 			chill = true
+		case "--stats", "-stats":
+			showStats = true
+		case "--stats-record", "-stats-record":
+			statsRecord = true
+		case "--stats-reset", "-stats-reset":
+			statsReset = true
+		case "--stats-clear", "-stats-clear":
+			statsClear = true
 		case "--watch", "-watch":
 			watchMode = true
 		case "--interval", "-interval":
@@ -310,6 +334,20 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// now" without redacting or un-redacting anything.
 	if vaultClear {
 		return runVaultClear(stdout, stderr)
+	}
+
+	// Stats lifecycle commands are standalone, like --vault-clear: they read no
+	// scan input and run no detectors. --stats prints the counter, --stats-reset
+	// zeroes it, --stats-clear deletes it. They short-circuit before any
+	// detection wiring.
+	if statsClear {
+		return runStatsClear(stdout, stderr)
+	}
+	if statsReset {
+		return runStatsReset(stdout, stderr)
+	}
+	if showStats {
+		return runStats(asJSON, stdout, stderr)
 	}
 
 	// Build the detection engine: always the built-in pack, plus any custom
@@ -431,8 +469,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// to avoid needlessly churning the clipboard on a clean scan. The human
 	// report then goes to stderr so it never contaminates piped stdout.
 	if fix {
+		recordStats(statsRecord, res, findings)
 		return runFix(res, findings, text, strategy, piped, asJSON, quiet, noVault, formatAware, stdout, stderr)
 	}
+
+	// Best-effort stats recording (opt-in). Do this before we render/return so
+	// both --fix and plain paths could share it — here it covers the report
+	// path; runFix records separately. A failure is swallowed: a vanity counter
+	// must never change a scan's exit code.
+	recordStats(statsRecord, res, findings)
 
 	if asJSON {
 		if err := report.RenderJSON(stdout, res); err != nil {
@@ -447,6 +492,100 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitClean
 	}
 	return exitFound
+}
+
+// statsEnabled reports whether recording should happen this run: either the
+// per-run --stats-record flag, or the persistent LEAKPEEK_STATS env opt-in.
+// Any "truthy" value for the env var (1/true/yes/on) enables it.
+func statsEnabled(flag bool) bool {
+	if flag {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LEAKPEEK_STATS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// resultKinds returns the distinct finding kinds present in a result, for the
+// stats byKind tally.
+func resultKinds(res report.Result) []string {
+	out := make([]string, 0, len(res.Groups))
+	seen := map[string]struct{}{}
+	for _, g := range res.Groups {
+		k := string(g.Kind)
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	return out
+}
+
+// recordStats folds one scan into the local counter when recording is enabled.
+// It is strictly best-effort: any error is intentionally discarded so a stats
+// hiccup can never affect the scan's exit code (issue #24's hard rule).
+func recordStats(flag bool, res report.Result, findings []detect.Finding) {
+	if !statsEnabled(flag) {
+		return
+	}
+	_ = stats.RecordAndSave(stats.DefaultPath(), !res.Clean, resultKinds(res), time.Now())
+}
+
+// runStats prints the local leak counter (human or JSON) and exits clean. A
+// read failure is a real error (exit 1) here because the user explicitly asked
+// to see the numbers — unlike the recording path, silence would be confusing.
+func runStats(asJSON bool, stdout, stderr io.Writer) int {
+	s, err := stats.Load(stats.DefaultPath())
+	if err != nil {
+		fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+		return exitError
+	}
+	if asJSON {
+		if err := stats.RenderJSON(stdout, s); err != nil {
+			fmt.Fprintf(stderr, "leakpeek: rendering json: %v\n", err)
+			return exitError
+		}
+		return exitClean
+	}
+	stats.Render(stdout, s, time.Now())
+	return exitClean
+}
+
+// runStatsReset zeroes the local counters (keeping the first-seen date) and
+// confirms. A missing file just starts and stays at zero.
+func runStatsReset(stdout, stderr io.Writer) int {
+	path := stats.DefaultPath()
+	s, err := stats.Load(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+		return exitError
+	}
+	s.Reset()
+	if err := stats.Save(path, s); err != nil {
+		fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+		return exitError
+	}
+	fmt.Fprintln(stdout, "🧮 leakpeek stats reset to zero. (Local-only; nothing was ever transmitted.)")
+	return exitClean
+}
+
+// runStatsClear deletes the local stats file and confirms. A missing file is a
+// fine "already clean" outcome.
+func runStatsClear(stdout, stderr io.Writer) int {
+	removed, err := stats.Clear(stats.DefaultPath())
+	if err != nil {
+		fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+		return exitError
+	}
+	if removed {
+		fmt.Fprintln(stdout, "🧹 leakpeek stats file deleted. The counter is gone.")
+	} else {
+		fmt.Fprintln(stdout, "✨ No leakpeek stats file to clear — nothing stored.")
+	}
+	return exitClean
 }
 
 // runWatch runs the resident clipboard watcher until interrupted (Ctrl-C /

@@ -291,6 +291,33 @@ $ printf 'internal box 10.0.4.7\n' | leakpeek; echo exit=$?
 exit=3
 ```
 
+## Local stats / streak (`--stats`)
+
+leakpeek quietly saves your bacon, but you never *see* the score. Turn on the fully-local, **opt-in** counter and the bouncer can occasionally brag:
+
+```console
+$ leakpeek --stats
+🛡️  leakpeek has stopped 47 leaks (across 210 runs).
+📅 This month: 12 leaks stopped.
+🔥 Streak: 5 days in a row.
+🏷️  Top kinds: secret×31, pii×12, network×4
+🗓️  Counting since 2026-07-08.
+🔒 Local-only. These numbers live on this machine and are never transmitted.
+```
+
+- **Opt-in, always.** Recording is off by default (leakpeek "forgets" by design). Enable it per-run with `--stats-record`, or persistently with `LEAKPEEK_STATS=1` in your environment.
+- **Where it lives.** `$XDG_STATE_HOME/leakpeek/stats.json` (falling back to `~/.local/state/leakpeek/stats.json`). Plain JSON: `totalLeaksStopped`, `totalRuns`, `byMonth`, `byKind`, `byDay`, `firstSeen`, `lastLeakAt`.
+- **What counts.** A run that stops **≥1 leak** bumps `totalLeaksStopped`, the current month, and each finding *kind* present. A clean run bumps only `totalRuns`. The **streak** is consecutive calendar days with at least one recorded run.
+- **Read it.** `leakpeek --stats` prints the human summary; `leakpeek --stats --json` prints the raw object. Both exit `0`.
+- **Forget it.** `leakpeek --stats-reset` zeroes the counters (keeping the first-seen date); `leakpeek --stats-clear` deletes the file entirely.
+- **Never breaks a scan.** Every write is best-effort: if the state dir is unwritable, recording is silently skipped — a vanity counter is never allowed to change a scan's exit code or block a redaction.
+- **Local-only, no network.** No leaderboards, no sync, no telemetry. The numbers never leave your machine.
+
+```bash
+printf 'k=AKIAIOSFODNN7EXAMPLE\n' | leakpeek --stdin --stats-record   # count this run
+LEAKPEEK_STATS=1 leakpeek --fix                                     # count every run
+```
+
 ## Reversible redaction (un-redact an AI's reply)
 
 Sometimes you don't just want to *hide* a secret — you want the AI's answer to still make sense when it hands your placeholder back. The `vault` strategy makes redaction reversible:

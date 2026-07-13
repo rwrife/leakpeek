@@ -25,6 +25,7 @@ const (
 	KindSecret     Kind = "secret"      // API keys, tokens, credentials
 	KindPrivateKey Kind = "private-key" // PEM/OpenSSH private-key material
 	KindPII        Kind = "pii"         // personal data (e.g. email)
+	KindPayment    Kind = "payment"     // payment-card numbers (PAN)
 	KindNetwork    Kind = "network"     // network/infra (e.g. IPv4)
 	KindEntropy    Kind = "entropy"     // generic high-entropy token
 )

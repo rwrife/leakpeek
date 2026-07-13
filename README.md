@@ -22,7 +22,27 @@ You paste stack traces, configs, and logs into ChatGPT all day. Sometimes they c
 
 **M1 (scaffold) is in:** `leakpeek` builds as a static binary, prints `--version`, and reads your clipboard (or `--stdin`) and echoes it back unchanged. CI builds + vets + tests on macOS, Linux, and Windows.
 
-**M2 (detector engine) is in:** the `internal/detect` package provides the brains — a `Detector` interface (`Name`, `Kind`, `Find`), a Shannon-entropy helper, overlapping-span de-duplication, and the v0.1 core secret pack: AWS access keys, OpenAI `sk-` keys, GitHub PATs, Slack tokens, JWTs, private-key headers, emails, IPv4 addresses, and a generic high-entropy catch-all. Specific detectors win over the catch-all during dedupe.
+**M2 (detector engine) is in:** the `internal/detect` package provides the brains — a `Detector` interface (`Name`, `Kind`, `Find`), a Shannon-entropy helper, overlapping-span de-duplication, and the v0.1 core secret pack: AWS access keys, OpenAI `sk-` keys, GitHub PATs, Slack tokens, JWTs, private-key headers, emails, IPv4 addresses, named-entity PII (credit-card numbers via Luhn, IBANs via mod-97, US SSNs, and phone numbers), and a generic high-entropy catch-all. Specific detectors win over the catch-all during dedupe.
+
+**Built-in detectors:**
+
+| Detector | Kind | Validation | Example |
+| --- | --- | --- | --- |
+| `aws-access-key` | secret | prefix + length | `AKIAIOSFODNN7EXAMPLE` |
+| `openai-key` | secret | prefix + length | `sk-proj-…` |
+| `github-pat` | secret | prefix + length | `ghp_…`, `github_pat_…` |
+| `slack-token` | secret | prefix + length | `xoxb-…` |
+| `jwt` | secret | `eyJ` header shape | `eyJhbGci….….…` |
+| `private-key` | private-key | PEM/OpenSSH header | `-----BEGIN … PRIVATE KEY-----` |
+| `email` | pii | shape | `jane@corp.internal` |
+| `credit-card` | payment | **Luhn** checksum | `4111 1111 1111 1111` |
+| `iban` | pii | **mod-97** checksum | `GB82 WEST 1234 5698 7654 32` |
+| `ssn` | pii | US area/group/serial filter | `078-05-1120` |
+| `phone` | pii | E.164 / national digit-count | `+1 202-555-0100` |
+| `ipv4` | network | octet range 0–255 | `10.0.12.34` |
+| `high-entropy-token` | entropy | Shannon-entropy gate | long random blobs |
+
+Credit-card findings are redacted receipt-style — all but the last four digits masked (`**** **** **** 1111`); the other PII detectors follow the standard shape/full/hash strategies.
 
 **M3 (report + exit codes + `--json`) is in:** leakpeek no longer echoes — it now *scans and reports*. It runs the engine over your clipboard (or `--stdin`), prints a grouped findings table (type, count, line/column, masked preview) with a one-line personality verdict, and exits **3** when it finds something (**0** when clean). `--json` emits a versioned, machine-readable document; `--quiet` stays silent on a clean scan (handy for shell aliases). Previews are masked (`AKIA…MPLE`, `sk-proj…CDEF`, `j…@example.com`, `10.x.x.x`) so the report never re-leaks the secret it just caught.
 
@@ -182,7 +202,7 @@ A rule file is an array of `[[rule]]` tables. Each rule needs a `name` and a
 # rules/acme.toml — flag Acme's internal stuff before it hits a chatbot.
 [[rule]]
 name  = "acme-internal-host"
-kind  = "network"                 # secret | private-key | pii | network | entropy
+kind  = "network"                 # secret | private-key | pii | payment | network | entropy
 regex = '[a-z0-9-]+\.acme\.internal'   # single-quote literal strings keep backslashes
 
 [[rule]]

@@ -232,6 +232,8 @@ func shapePreserve(kind detect.Kind, match string) string {
 		return "[REDACTED]"
 	case detect.KindNetwork:
 		return redactIP(match)
+	case detect.KindPayment:
+		return redactCard(match)
 	default:
 		return redactToken(match)
 	}
@@ -300,6 +302,40 @@ func redactIP(s string) string {
 		return "[REDACTED]"
 	}
 	return "x.x.x.x"
+}
+
+// redactCard masks a payment-card number keeping only the last four digits —
+// the receipt convention people recognize — and preserves the four-group card
+// shape, e.g. "4111 1111 1111 1111" → "**** **** **** 1111". Any original
+// separators are dropped in favor of a canonical grouped mask; the last four
+// are the only original digits that survive (never credential material — the
+// last four alone can't reconstruct a PAN).
+func redactCard(s string) string {
+	var digits []byte
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			digits = append(digits, s[i])
+		}
+	}
+	if len(digits) < 4 {
+		return "[REDACTED]"
+	}
+	last4 := string(digits[len(digits)-4:])
+	// Build a masked string the same digit-length as the original, grouped in
+	// fours for legibility, revealing only the final four digits.
+	masked := make([]byte, len(digits))
+	for i := range masked {
+		masked[i] = '*'
+	}
+	copy(masked[len(masked)-4:], last4)
+	var b strings.Builder
+	for i := 0; i < len(masked); i++ {
+		if i > 0 && i%4 == 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteByte(masked[i])
+	}
+	return b.String()
 }
 
 // kindLabel renders a Kind as an uppercase token for Full/Hash output, e.g.

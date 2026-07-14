@@ -103,6 +103,28 @@ var secretSamples = []struct {
 		"host 10.0.12.34 is internal",
 		[]string{"10.0.12.34", "0.12.34"},
 	},
+	{
+		// Card: the last four legitimately survive (receipt convention), so the
+		// forbidden fragments are the leading digits only.
+		"credit-card",
+		"pay 4012 8888 8888 1881 now",
+		[]string{"4012 8888 8888", "40128888", "888818"},
+	},
+	{
+		"iban",
+		"send to DE89370400440532013000 please",
+		[]string{"DE89370400440532013000", "370400440532013000"},
+	},
+	{
+		"ssn",
+		"ssn 078-05-1120 on file",
+		[]string{"078-05-1120", "078051120"},
+	},
+	{
+		"phone",
+		"call +1 202-555-0100 today",
+		[]string{"202-555-0100", "2025550100"},
+	},
 }
 
 // TestRedactNeverLeaks is the headline guarantee: for every detector and
@@ -143,6 +165,7 @@ func TestShapePreservesHints(t *testing.T) {
 		{"slack", "k=xoxb-EXAMPLE-PLACEHOLDER-TOKEN", "xoxb-REDACTED"},
 		{"email", "m=jane.doe@corp.internal", "REDACTED@corp.internal"},
 		{"ipv4", "ip=10.0.12.34", "x.x.x.x"},
+		{"card", "pay 4012 8888 8888 1881 now", "1881"},
 	}
 	for _, tc := range cases {
 		out := Redact(tc.text, scan(t, tc.text), Shape)

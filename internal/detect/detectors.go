@@ -19,7 +19,7 @@ func DefaultDetectors() []Detector {
 // private-key, email, ipv4) is identical across profiles — a real key is a
 // real key regardless of the sensitivity dial.
 func DefaultDetectorsProfile(p EntropyProfile) []Detector {
-	return []Detector{
+	core := []Detector{
 		awsAccessKey,
 		openAIKey,
 		githubPAT,
@@ -28,8 +28,13 @@ func DefaultDetectorsProfile(p EntropyProfile) []Detector {
 		privateKey,
 		email,
 		ipv4,
-		entropyDetector(p), // broad catch-all, registered last on purpose
 	}
+	// Named-entity PII (card / IBAN / SSN / phone) sits after the credential
+	// detectors but before the generic entropy catch-all, so a real card or
+	// IBAN is labeled precisely rather than as an anonymous high-entropy blob.
+	core = append(core, DefaultPIIDetectors()...)
+	core = append(core, entropyDetector(p)) // broad catch-all, registered last
+	return core
 }
 
 // regexDetector adapts a compiled regexp into a Detector. Most of the pack

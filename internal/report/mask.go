@@ -30,6 +30,9 @@ func Mask(kind detect.Kind, match string) string {
 		// IPs aren't secret like a key, but they're still infra you may not
 		// want to share; reveal the first octet only.
 		return maskIP(match)
+	case detect.KindPayment:
+		// Card numbers: reveal only the last four digits, receipt-style.
+		return maskCard(match)
 	default:
 		// secrets / entropy tokens: keep a recognizable prefix (incl. known
 		// key schemes like sk-/AKIA) and the last few chars.
@@ -80,6 +83,22 @@ func isAWSPrefix(p string) bool {
 		return true
 	}
 	return false
+}
+
+// maskCard reveals only the last four digits of a payment-card number,
+// receipt-style: "4111 1111 1111 1111" → "… 1111". Returns a bare ellipsis
+// tag if somehow fewer than four digits are present.
+func maskCard(s string) string {
+	var digits []rune
+	for _, c := range s {
+		if c >= '0' && c <= '9' {
+			digits = append(digits, c)
+		}
+	}
+	if len(digits) < 4 {
+		return "[…]"
+	}
+	return "… " + string(digits[len(digits)-4:])
 }
 
 // maskEmail reveals the first character of the local part and the full domain,

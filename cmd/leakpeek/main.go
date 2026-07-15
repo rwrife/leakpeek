@@ -69,6 +69,7 @@ const usage = `leakpeek %s — a paranoid bouncer for your clipboard.
 
 Usage:
   leakpeek [flags]
+  leakpeek scan [flags] <path>...   Frisk files/folders before you share them.
 
 Scans your clipboard (or stdin) for secrets, keys, and PII and prints what
 it found. Exits %d when something is found, %d when clean.
@@ -164,6 +165,14 @@ func dropKind(findings []detect.Finding, kind detect.Kind) []detect.Finding {
 
 // run is the testable entry point. It returns the process exit code.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// Subcommand dispatch. `leakpeek scan <path>...` frisks files/folders and
+	// owns its own flag parsing (it takes positional path args, which the
+	// clipboard path's hand-rolled parser doesn't). We intercept it before the
+	// flag loop so a leading `scan` token is never misread as an unknown flag.
+	if len(args) > 0 && args[0] == "scan" {
+		return runScan(args[1:], stdout, stderr)
+	}
+
 	var (
 		showVersion bool
 		useStdin    bool

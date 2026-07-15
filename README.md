@@ -66,6 +66,8 @@ The guarantee: for every strategy and every detector, the redacted output contai
 
 **AI-CLI pre-paste hook is in:** the guard now reaches the prompts you fire straight from the terminal into a local model. [`scripts/leakpeek-guard`](./scripts/leakpeek-guard) is a dependency-free POSIX-sh wrapper that frisks a prompt on stdin *before* it reaches `llm`, `aichat`, `ollama run`, or any other stdin-reading AI CLI, and enforces a **block-or-redact policy**: `block` (default) refuses to run the tool and exits `3` when a secret is present, `redact` sends a scrubbed copy instead, `warn` forwards the original but flags it, and `off` is a pass-through escape hatch. Everything after `--` is the command it guards (`… | leakpeek-guard -- ollama run llama3`), so it drops into a shell function in one line. It adds no detection logic of its own — it rides leakpeek's existing `--stdin`/`--fix` contract and inherits `--rules`/`--strategy` — buffers the prompt only in a `umask 077` temp file that's shredded on exit, and never phones home. Ten scenarios are covered by an integration test that drives the real script against a freshly built binary. This is the [Git pre-paste hook for AI CLIs](./PLAN.md#8-backlog--future-features-v02) item from the backlog.
 
+**Scan mode (`leakpeek scan <path>…`) is in:** where the clipboard path frisks the one thing in your hand, `scan` frisks the *folder you're about to zip up and hand to an AI or a vendor*. It walks files and directories (recursively), runs the same detector engine over every text file, and reports findings **grouped per file** with a one-line summary (`🚫 3 secrets across 2 files (17 files scanned)`). Binary files are skipped automatically (NUL-byte / invalid-UTF-8 heuristic), and noisy dependency/VCS dirs (`.git`, `node_modules`, `vendor`, `.venv`, …) are pruned from the walk. It honors your `.leakpeekignore` allowlist and `--ignore` files, the custom `--rules` pack, and the `--strict`/`--chill` sensitivity dials exactly like the clipboard path. `--json` emits a `files[]` array where each element carries the same per-file report schema you already parse; `--quiet` prints only the files that have hits. It exits **3** if any file has a finding, **0** when everything's clean. This is the [`scan <path>` diff/scan mode](./PLAN.md#8-backlog--future-features-v02) item from the backlog.
+
 ## Build & run (from source)
 
 ```bash
@@ -79,6 +81,9 @@ cat secrets.env | ./leakpeek --fix > clean.env        # redact a pipe to stdout
 ./leakpeek --fix --strategy full           # or: --strategy hash
 ./leakpeek --watch                          # stand guard: alert the moment a secret is copied
 ./leakpeek --watch --interval 500ms        # poll faster (default 800ms, min 100ms)
+./leakpeek scan .                            # frisk a whole folder before you share it
+./leakpeek scan --json src/ config.env      # per-file findings as JSON
+./leakpeek scan --quiet .; echo "exit=$?"  # print only files with hits
 ```
 
 Example human report on a dirty input:

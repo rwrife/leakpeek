@@ -59,6 +59,10 @@ type Result struct {
 	Items   []Item  `json:"findings"`
 	Groups  []Group `json:"groups"`
 	Verdict string  `json:"verdict"` // the one-line personality summary
+
+	// Annotation is the --fix provenance footer (kind/count summary, no values),
+	// set only when --annotate is used. Empty otherwise and omitted from JSON.
+	Annotation string `json:"annotation,omitempty"`
 }
 
 // Build maps raw findings against the scanned text into a Result: it computes

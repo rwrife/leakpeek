@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/rwrife/leakpeek/internal/allow"
+	annotatepkg "github.com/rwrife/leakpeek/internal/annotate"
 	"github.com/rwrife/leakpeek/internal/clipboard"
 	"github.com/rwrife/leakpeek/internal/detect"
 	"github.com/rwrife/leakpeek/internal/notify"
@@ -113,6 +114,10 @@ Flags:
                      input, scrub the *values* that hold a secret and keep the
                      keys and shape, so the AI still sees the structure. Falls
                      back to normal redaction for plain text. (Aka --format.)
+  --annotate         With --fix, append a short provenance footer summarizing
+                     what was redacted by kind/count (never values), e.g.
+                     [leakpeek: redacted 2 API keys, 1 email]. --json mirrors
+                     it in an "annotation" field.
   --rules <path>     Load extra detectors from a TOML rule file or a directory
                      of *.toml files. Custom rules run alongside the built-ins.
   --ignore <path>    Load allowlist entries from an ignore file (repeatable).
@@ -163,6 +168,24 @@ func dropKind(findings []detect.Finding, kind detect.Kind) []detect.Finding {
 	return out
 }
 
+// appendFooter attaches the provenance footer to redacted text on its own
+// trailing line. If the text already ends in a newline the footer slots right
+// after it (preserving that newline); otherwise a separating newline is
+// inserted first. The footer itself gets a trailing newline so the payload
+// stays line-clean for pipes and clipboard alike.
+func appendFooter(redacted, footer string) string {
+	if footer == "" {
+		return redacted
+	}
+	if redacted == "" {
+		return footer + "\n"
+	}
+	if strings.HasSuffix(redacted, "\n") {
+		return redacted + footer + "\n"
+	}
+	return redacted + "\n" + footer + "\n"
+}
+
 // run is the testable entry point. It returns the process exit code.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Subcommand dispatch. `leakpeek scan <path>...` frisks files/folders and
@@ -190,6 +213,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		keepVault   bool
 		noVault     bool
 		formatAware bool
+		annotate    bool
 		strict      bool
 		chill       bool
 		showStats   bool
@@ -230,6 +254,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			noVault = true
 		case "--format-aware", "-format-aware", "--format", "-format":
 			formatAware = true
+		case "--annotate", "-annotate":
+			annotate = true
 		case "--strict", "-strict":
 			strict = true
 		case "--chill", "-chill":
@@ -479,7 +505,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// report then goes to stderr so it never contaminates piped stdout.
 	if fix {
 		recordStats(statsRecord, res, findings)
-		return runFix(res, findings, text, strategy, piped, asJSON, quiet, noVault, formatAware, stdout, stderr)
+		return runFix(res, findings, text, strategy, piped, asJSON, quiet, noVault, formatAware, annotate, stdout, stderr)
 	}
 
 	// Best-effort stats recording (opt-in). Do this before we render/return so
@@ -705,7 +731,7 @@ func runFix(
 	findings []detect.Finding,
 	text string,
 	strategy redact.Strategy,
-	piped, asJSON, quiet, noVault, formatAware bool,
+	piped, asJSON, quiet, noVault, formatAware, annotate bool,
 	stdout, stderr io.Writer,
 ) int {
 	var (
@@ -731,6 +757,17 @@ func runFix(
 		redacted = redact.Redact(text, findings, strategy)
 	}
 
+	// --annotate: append a provenance footer summarizing what was redacted, by
+	// kind/count (never values). Only when we actually redacted something. The
+	// footer notes reversibility when the vault strategy persisted a session.
+	var footer string
+	if annotate && !res.Clean {
+		footer = annotatepkg.Footer(findings, strategy == redact.Vault)
+		if footer != "" {
+			redacted = appendFooter(redacted, footer)
+		}
+	}
+
 	if piped {
 		// Pipe mode: redacted text is the payload, so it owns stdout. Print it
 		// verbatim (no trailing newline added) and route any report to stderr.
@@ -742,7 +779,7 @@ func runFix(
 			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
 			return exitError
 		}
-		emitFixReport(res, asJSON, quiet, stderr, stderr, false, vaultSave != nil)
+		emitFixReport(res, asJSON, quiet, stderr, stderr, false, vaultSave != nil, footer)
 	} else {
 		// Clipboard mode: only write back when we changed something, so a clean
 		// scan leaves the clipboard untouched.
@@ -756,7 +793,7 @@ func runFix(
 			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
 			return exitError
 		}
-		emitFixReport(res, asJSON, quiet, stdout, stderr, true, vaultSave != nil)
+		emitFixReport(res, asJSON, quiet, stdout, stderr, true, vaultSave != nil, footer)
 	}
 
 	if res.Clean {
@@ -783,8 +820,11 @@ func persistVault(v *vault.Vault) error {
 // true) or stdout (false). When savedVault is true it also notes that the
 // mapping was stored and how to reverse it, so the reversible workflow is
 // discoverable right where it's used.
-func emitFixReport(res report.Result, asJSON, quiet bool, out, jsonErr io.Writer, toClipboard, savedVault bool) {
+func emitFixReport(res report.Result, asJSON, quiet bool, out, jsonErr io.Writer, toClipboard, savedVault bool, footer string) {
 	if asJSON {
+		// Mirror the human footer into the machine-readable document so --json
+		// consumers see the same provenance summary.
+		res.Annotation = footer
 		if err := report.RenderJSON(out, res); err != nil {
 			fmt.Fprintf(jsonErr, "leakpeek: rendering json: %v\n", err)
 		}
@@ -796,6 +836,9 @@ func emitFixReport(res report.Result, asJSON, quiet bool, out, jsonErr io.Writer
 			fmt.Fprintln(out, "✍️  Redacted copy is on your clipboard.")
 		} else {
 			fmt.Fprintln(out, "✍️  Redacted copy written to stdout.")
+		}
+		if footer != "" {
+			fmt.Fprintf(out, "🏷️  %s\n", footer)
 		}
 		if savedVault {
 			fmt.Fprintln(out, "🔐 Reversible: after the AI replies, run `leakpeek --unredact` to restore your secrets.")

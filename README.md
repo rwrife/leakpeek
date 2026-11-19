@@ -70,6 +70,41 @@ The guarantee: for every strategy and every detector, the redacted output contai
 
 **Scan mode (`leakpeek scan <path>…`) is in:** where the clipboard path frisks the one thing in your hand, `scan` frisks the *folder you're about to zip up and hand to an AI or a vendor*. It walks files and directories (recursively), runs the same detector engine over every text file, and reports findings **grouped per file** with a one-line summary (`🚫 3 secrets across 2 files (17 files scanned)`). Binary files are skipped automatically (NUL-byte / invalid-UTF-8 heuristic), and noisy dependency/VCS dirs (`.git`, `node_modules`, `vendor`, `.venv`, …) are pruned from the walk. It honors your `.leakpeekignore` allowlist and `--ignore` files, the custom `--rules` pack, and the `--strict`/`--chill` sensitivity dials exactly like the clipboard path. `--json` emits a `files[]` array where each element carries the same per-file report schema you already parse; `--quiet` prints only the files that have hits. It exits **3** if any file has a finding, **0** when everything's clean. This is the [`scan <path>` diff/scan mode](./PLAN.md#8-backlog--future-features-v02) item from the backlog.
 
+## Diff mode
+
+`leakpeek --diff` compares the clipboard with the previous `--diff` input and
+scans only added/changed lines. `leakpeek --stdin --diff --json < app.log` does
+the same for stdin. Unchanged lines (including their accepted findings) are
+not scanned; the verdict says **no new secrets**, not that the whole input is
+paste-safe. Line/column and byte offsets always reference the full current
+input, including Unicode and CRLF line endings.
+
+The first run without a baseline scans everything and seeds the next comparison.
+Only `--diff` runs save snapshots; ordinary scans and watch mode store no diff
+content. Each successful diff scan replaces the snapshot with the full current
+input, even if it is clean. `--no-snapshot` reads an existing baseline but does
+not write or refresh it; with no baseline it performs a full, memory-only scan.
+`leakpeek --diff-clear` removes the snapshot without reading the clipboard.
+Diff mode cannot be combined with `--fix`, `--watch`, `--unredact`, or vault/stats
+lifecycle commands. In particular, diff-only redaction could leave old secrets
+in a supposedly safe copy; use an ordinary `--fix` scan instead.
+
+Snapshots contain **raw input**, remain local, and are never transmitted.
+They live in a per-user directory under the OS temp directory, with owner-only
+permissions (directory `0700`, file `0600` on Unix; a protected owner-only ACL
+on Windows). Symlinks and unsafe permissions are refused. Snapshots expire
+after **15 minutes**; the next read deletes an expired snapshot, warns, and
+performs a full scan. Expiry is lazy, not a background cleanup timer; clear the
+snapshot explicitly when finished. Removal unlinks the file, not a guaranteed
+physical secure erase.
+
+JSON findings (including grouped items) have `newSince: true` in diff mode
+(`false` in ordinary scans). Top-level `baselineAgeSeconds` is the baseline's
+age at comparison, or `null` when there was no usable baseline (and for ordinary
+scans). Clean diff runs exit `0`; new findings exit `3`, as with ordinary scans.
+Adjacent changed lines are scanned together, so multiline custom rules can
+match within a changed range, but never across an unchanged gap.
+
 ## Build & run (from source)
 
 ```bash

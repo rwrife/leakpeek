@@ -21,6 +21,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 	annotatepkg "github.com/rwrife/leakpeek/internal/annotate"
 	"github.com/rwrife/leakpeek/internal/clipboard"
 	"github.com/rwrife/leakpeek/internal/detect"
+	diffscan "github.com/rwrife/leakpeek/internal/diff"
 	"github.com/rwrife/leakpeek/internal/notify"
 	"github.com/rwrife/leakpeek/internal/redact"
 	"github.com/rwrife/leakpeek/internal/report"
@@ -87,6 +89,12 @@ With --watch it stays resident, taps the clipboard on an interval, and alerts
 the instant a secret lands on it (desktop notification + terminal bell).
 
 Flags:
+  --diff             Scan only added/changed lines against the last --diff
+                     input. First run scans everything. Saves a local,
+                     owner-only snapshot in temp for 15 minutes.
+                     Not a paste-safety guarantee for unchanged lines.
+  --no-snapshot      With --diff, read the baseline but do not save this input.
+  --diff-clear       Remove the diff snapshot and exit (standalone).
   --watch            Stay resident and watch the clipboard, alerting on any
                      secret the moment it's copied. Press Ctrl-C to stop.
                      Stores nothing; scans in memory only.
@@ -220,6 +228,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		statsRecord bool
 		statsReset  bool
 		statsClear  bool
+		diffMode    bool
+		noSnapshot  bool
+		diffClear   bool
 	)
 
 	// Minimal stdlib-style flag parsing. We hand-roll it to keep the binary
@@ -234,6 +245,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		name, inlineVal, hasInline := splitFlag(arg)
 
 		switch name {
+		case "--diff", "-diff":
+			diffMode = true
+		case "--no-snapshot", "-no-snapshot":
+			noSnapshot = true
+		case "--diff-clear", "-diff-clear":
+			diffClear = true
 		case "--version", "-version", "-v":
 			showVersion = true
 		case "--stdin", "-stdin":
@@ -363,6 +380,25 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitClean
 	}
 
+	if (noSnapshot && !diffMode) ||
+		(diffClear && len(args) != 1) ||
+		(diffMode && (fix || watchMode || unredact || vaultClear || showStats || statsReset || statsClear)) {
+		fmt.Fprintln(stderr, "leakpeek: --no-snapshot requires --diff; --diff-clear is standalone; --diff cannot be combined with --fix, --watch, vault or stats lifecycle commands")
+		return exitUsage
+	}
+	if diffClear {
+		dir, err := diffscan.DefaultDir()
+		if err == nil {
+			err = diffscan.Clear(dir)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintln(stdout, "Diff snapshot cleared.")
+		return exitClean
+	}
+
 	// --vault-clear is a standalone lifecycle command: wipe the saved
 	// reversible-redaction session and exit. It reads no input and runs no
 	// detectors — it exists purely so a user can say "forget my stored secrets
@@ -482,7 +518,33 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// Frisk it.
-	findings := engine.Scan(text)
+	var findings []detect.Finding
+	var snapshotDir string
+	var baselineAge *float64
+	if diffMode {
+		snapshotDir, err = diffscan.DefaultDir()
+		if err != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
+		now := time.Now()
+		snapshot, loadErr := diffscan.Load(snapshotDir, now)
+		if errors.Is(loadErr, diffscan.ErrExpired) {
+			fmt.Fprintln(stderr, "leakpeek: diff snapshot expired and was cleared; performing a full scan.")
+		} else if loadErr != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", loadErr)
+			return exitError
+		}
+		var baseline *string
+		if snapshot != nil {
+			baseline = &snapshot.Text
+			age := now.Sub(snapshot.Created).Seconds()
+			baselineAge = &age
+		}
+		findings = diffscan.Scan(engine, text, baseline)
+	} else {
+		findings = engine.Scan(text)
+	}
 	// --chill suppresses bare network (IPv4) findings by default: internal IPs
 	// are the most common "meh" hit, and a relaxed run shouldn't nag about
 	// them. Structured secrets are untouched. (#22 allowlist work can later
@@ -496,6 +558,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	findings, ignored := allowSet.Filter(findings)
 	res := report.Build(text, findings, ignored)
 	res.Profile = profileName
+	if diffMode {
+		res.MarkDiff(baselineAge)
+	}
 
 	// --fix: redact and hand back a safe copy. When the input came from a
 	// pipe we print the (possibly unchanged) redacted text to stdout so the
@@ -520,7 +585,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return exitError
 		}
 	} else {
-		report.Render(stdout, res, quiet)
+		var rendered bytes.Buffer
+		report.Render(&rendered, res, quiet)
+		if _, err := stdout.Write(rendered.Bytes()); err != nil {
+			fmt.Fprintf(stderr, "leakpeek: writing report: %v\n", err)
+			return exitError
+		}
+	}
+	if diffMode && !noSnapshot {
+		if err := diffscan.Save(snapshotDir, text, time.Now()); err != nil {
+			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+			return exitError
+		}
 	}
 
 	if res.Clean {

@@ -38,6 +38,7 @@ type Item struct {
 	Start    int         `json:"start"`  // inclusive byte offset
 	End      int         `json:"end"`    // exclusive byte offset
 	Preview  string      `json:"preview"`
+	NewSince bool        `json:"newSince"` // true for findings from a --diff scan
 }
 
 // Group aggregates all items produced by a single detector, so the human
@@ -63,6 +64,31 @@ type Result struct {
 	// Annotation is the --fix provenance footer (kind/count summary, no values),
 	// set only when --annotate is used. Empty otherwise and omitted from JSON.
 	Annotation string `json:"annotation,omitempty"`
+
+	// BaselineAgeSeconds is nil when no diff baseline was used.
+	BaselineAgeSeconds *float64 `json:"baselineAgeSeconds"`
+}
+
+// MarkDiff adds diff metadata to both representations of each finding.
+// A nil age denotes a full scan because no usable baseline was available.
+func (res *Result) MarkDiff(age *float64) {
+	res.BaselineAgeSeconds = age
+	for i := range res.Items {
+		res.Items[i].NewSince = true
+	}
+	res.Groups = group(res.Items)
+	if res.Clean {
+		res.Verdict = "✅ No new secrets since last scan. Unchanged lines were not scanned."
+	} else {
+		noun := "finding"
+		if res.Total != 1 {
+			noun = "findings"
+		}
+		res.Verdict = fmt.Sprintf("🚫 %d new %s since last scan. Unchanged lines were not scanned.", res.Total, noun)
+	}
+	if age == nil {
+		res.Verdict = verdict(*res) + " No diff baseline; performed a full scan."
+	}
 }
 
 // Build maps raw findings against the scanned text into a Result: it computes

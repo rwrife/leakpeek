@@ -17,6 +17,7 @@ coverage.txt
 *.swp
 
 # Local config / scratch
+.worktrees/
 *.local
 .env
 rules/*.local.toml

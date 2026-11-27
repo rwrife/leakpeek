@@ -225,6 +225,60 @@ pbpaste | leakpeek --stdin            # or wl-paste / xclip -o, etc.
 cat secrets.env | leakpeek --fix > clean.env
 ```
 
+## Trust but verify — run `leakpeek verify`
+
+```bash
+leakpeek verify
+leakpeek verify --json                   # CI-friendly result
+leakpeek verify --rules mine.toml        # built-ins plus your rules
+```
+
+Verification runs every detector independently against named positive and
+negative fixtures, prints a matrix of positives caught/total, false positives,
+and PASS/FAIL, then an overall verdict. It exits **0** only when everything
+passes, **1** on a missed positive, a false positive, or an operational error,
+and **2** on bad usage. The built-in corpus is embedded with `go:embed`: no
+network, clipboard, stdin, or external corpus files are needed. Allowlists
+and sensitivity overrides are deliberately not applied to this default-pack
+self-test. JSON has `schema_version: 1`, `mode: "verify"`, `passed`, and a
+`detectors` array with counts, verdicts (`passed`), and named failures; fixture
+text is not emitted.
+
+The [bundled corpus](internal/verify/corpus.json) covers all built-ins. Its
+documented false-positive traps are: truncated AWS/GitHub/Slack tokens, short
+`sk-` strings, ordinary dotted identifiers (not JWTs), public-key and non-PEM
+private-looking headers, incomplete email addresses, out-of-range IPv4 octets,
+invalid card/IBAN checksums, a Luhn-valid sequence too short to be a card,
+unissued/zero SSN groups, unformatted numeric IDs and short phone numbers,
+long English word runs, a short base64 English greeting, and low-entropy
+mixed-character tokens. These are bounded regression checks, not a guarantee
+that all Luhn-valid IDs or all base64-encoded prose will be ignored.
+
+### Self-test custom rules
+
+For `--rules mine.toml`, place fixtures in **`mine.toml.fixtures.json`**.
+For `--rules ./rules`, place a single **`rules/fixtures.json`** beside the
+TOML files, covering every rule loaded from that directory:
+
+```json
+[
+  {
+    "detector": "acme-employee-id",
+    "positives": [{"name": "employee ID", "text": "EMP-123456"}],
+    "negatives": [{"name": "too short", "text": "EMP-12"}]
+  }
+]
+```
+
+Each detector needs at least one positive and one negative; names must be
+unique within that detector and fixture text must be nonempty. Missing
+fixtures, unknown detector names/fields, and duplicate detector names
+(including collisions with built-ins) are errors rather than untested
+passes. A positive passes if that detector finds anything in its text; a
+negative passes only if it finds nothing. Fixtures are tested only against
+their named detector, so overlap with another detector cannot mask a miss.
+Use synthetic examples, not real secrets, in fixture files.
+
 ## Custom rules
 
 The built-in pack covers the usual suspects, but your secrets are yours: an

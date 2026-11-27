@@ -94,21 +94,9 @@ func LoadPath(path string) ([]detect.Detector, error) {
 
 	var files []string
 	if info.IsDir() {
-		entries, err := os.ReadDir(path)
+		files, err = directoryRuleFiles(path, "")
 		if err != nil {
-			return nil, fmt.Errorf("reading rules dir %q: %w", path, err)
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			if strings.HasSuffix(strings.ToLower(e.Name()), ".toml") {
-				files = append(files, filepath.Join(path, e.Name()))
-			}
-		}
-		sort.Strings(files)
-		if len(files) == 0 {
-			return nil, fmt.Errorf("no .toml rule files found in directory %q", path)
+			return nil, err
 		}
 	} else {
 		files = []string{path}
@@ -123,6 +111,24 @@ func LoadPath(path string) ([]detect.Detector, error) {
 		detectors = append(detectors, ds...)
 	}
 	return detectors, nil
+}
+
+func directoryRuleFiles(path, exclude string) ([]string, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading rules dir %q: %w", path, err)
+	}
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && e.Name() != exclude && strings.HasSuffix(strings.ToLower(e.Name()), ".toml") {
+			files = append(files, filepath.Join(path, e.Name()))
+		}
+	}
+	sort.Strings(files)
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no .toml rule files found in directory %q", path)
+	}
+	return files, nil
 }
 
 // loadFile reads and compiles a single rule file, prefixing every error with

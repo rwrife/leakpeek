@@ -73,6 +73,8 @@ const usage = `leakpeek %s — a paranoid bouncer for your clipboard.
 Usage:
   leakpeek [flags]
   leakpeek scan [flags] <path>...   Frisk files/folders before you share them.
+  leakpeek packs list             List locally installed rule packs.
+  leakpeek packs show <name>      Show a rule pack's detectors.
 
 Scans your clipboard (or stdin) for secrets, keys, and PII and prints what
 it found. Exits %d when something is found, %d when clean.
@@ -128,6 +130,8 @@ Flags:
                      it in an "annotation" field.
   --rules <path>     Load extra detectors from a TOML rule file or a directory
                      of *.toml files. Custom rules run alongside the built-ins.
+  --rule-pack <name> Load a named local rule pack (repeatable; combines with
+                     --rules). Use "leakpeek packs list" to discover packs.
   --ignore <path>    Load allowlist entries from an ignore file (repeatable).
                      Layered on top of any discovered .leakpeekignore files;
                      honored even with --no-ignore.
@@ -203,6 +207,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "scan" {
 		return runScan(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "packs" {
+		return runPacks(args[1:], stdout, stderr)
+	}
 
 	var (
 		showVersion bool
@@ -212,6 +219,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fix         bool
 		strategy    = redact.Shape
 		rulesPath   string
+		rulePacks   []string
 		ignorePaths []string
 		noIgnore    bool
 		watchMode   bool
@@ -325,6 +333,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				return exitUsage
 			}
 			strategy = s
+		case "--rule-pack", "-rule-pack":
+			val := inlineVal
+			if !hasInline {
+				if i+1 >= len(args) {
+					fmt.Fprintln(stderr, "leakpeek: --rule-pack needs a name")
+					return exitUsage
+				}
+				i++
+				val = args[i]
+			}
+			if strings.TrimSpace(val) == "" || !hasInline && strings.HasPrefix(val, "-") {
+				fmt.Fprintln(stderr, "leakpeek: --rule-pack needs a non-empty pack name")
+				return exitUsage
+			}
+			rulePacks = append(rulePacks, val)
 		case "--rules", "-rules":
 			val := inlineVal
 			if !hasInline {
@@ -450,14 +473,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	engine := detect.DefaultProfile(profile)
-	if rulesPath != "" {
-		custom, err := rules.LoadPath(rulesPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
-			return exitError
-		}
-		engine = engine.WithDetectors(custom...)
+	custom, err := rules.LoadExtras(rulesPath, rulePacks)
+	if err != nil {
+		fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+		return exitError
 	}
+	engine = engine.WithDetectors(custom...)
 
 	// Build the allowlist (PLAN.md §8.2): a post-detection filter that drops
 	// findings the user marked known-safe. Unless --no-ignore is set, we

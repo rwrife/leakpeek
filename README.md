@@ -268,6 +268,67 @@ Notes:
 
 A starter file lives at [`rules/example.toml`](./rules/example.toml).
 
+## Org rule packs
+
+Share a named, versioned directory with your team instead of passing rule-file
+paths around. Packs are entirely **local and offline**: no registry, downloads,
+or telemetry. Install them by copying a directory into a pack search root:
+
+```text
+<pack-root>/
+  acme/
+    leakpeek-pack.toml
+    hosts.toml
+    projects.toml
+```
+
+The manifest uses the same single-line quoted-string TOML subset as rule files:
+
+```toml
+name = "acme"
+version = "1.0.0"
+description = "Internal hostnames and project code names" # optional
+```
+
+`name` and a non-blank `version` are required (versions are labels, not version
+constraints). The name must match the directory name and use only letters,
+digits, `.`, `_`, or `-`, excluding `.` and `..`. Each pack must contain at
+least one rule; every other `*.toml` file directly inside it is loaded in
+filename order, with the usual `[[rule]]` format. Subdirectories are not loaded.
+
+Search roots, **highest priority first**:
+
+1. `$LEAKPEEK_PACKS`, if set: a single directory containing pack directories,
+   not a path list or a pack directory itself. Relative paths resolve from cwd.
+2. `~/.config/leakpeek/packs/` (also on Windows).
+3. `./.leakpeek/packs/` in the current working directory.
+
+The first matching pack directory wins, regardless of version; packs with the
+same name are not merged. An invalid higher-priority pack fails explicitly
+instead of silently falling back. Missing-pack errors print the searched paths.
+`packs list` shows the effective version of each discovered pack, its rule
+count and path; `packs show` lists its detector names and kinds.
+
+```bash
+# Try the shipped example without installing anything:
+export LEAKPEEK_PACKS="$PWD/rules"
+leakpeek packs list
+leakpeek packs show acme
+printf 'db.acme.internal ACME-PROJECT-0042\n' | leakpeek --stdin --rule-pack acme
+
+# Or copy rules/acme to ~/.config/leakpeek/packs/acme.
+leakpeek --fix --rule-pack acme --rule-pack infra --rules private.local.toml
+leakpeek scan --rule-pack acme src/
+```
+
+In PowerShell, use `$env:LEAKPEEK_PACKS = Join-Path $PWD 'rules'`.
+`--rule-pack` is repeatable (including `--rule-pack=acme`) and works with
+clipboard, stdin, watch, redaction, and file scans. Built-ins keep the existing
+equal-span dedupe priority, followed by `--rules`, then packs in flag order.
+Repeated pack names are loaded once. Pack findings use the same reporting,
+allowlisting, and redaction as all other custom rules. For names starting with
+`-`, use the inline `--rule-pack=-name` form.
+
 ## Allowlist (`.leakpeekignore`)
 
 leakpeek is a frisker, but some tokens are *known-safe* and firing on them every

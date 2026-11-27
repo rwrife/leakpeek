@@ -1,0 +1,4 @@
+[[rule]]
+name = "acme-internal-host"
+kind = "network"
+regex = '[a-z0-9-]+\.acme\.internal'

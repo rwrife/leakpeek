@@ -1,0 +1,3 @@
+[[rule]]
+name = "acme-project-code"
+regex = 'ACME-PROJECT-[0-9]{4}'

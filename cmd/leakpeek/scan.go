@@ -20,12 +20,13 @@ Usage:
 Walks each path (files directly, directories recursively), runs the detector
 engine over every text file, and reports findings grouped per file. Binary
 files are skipped. Honors .leakpeekignore / --ignore allowlists and the custom
---rules pack, exactly like the clipboard path.
+--rules and --rule-pack bundles, exactly like the clipboard path.
 
 Exits %d when any file has a finding, %d when everything is clean.
 
 Flags:
   --rules <path>     Load extra detectors from a TOML file or directory.
+  --rule-pack <name> Load a named local rule pack (repeatable).
   --ignore <path>    Load allowlist entries from an ignore file (repeatable).
   --no-ignore        Don't auto-discover .leakpeekignore files for this run.
   --strict           Paranoid entropy tuning (flag more generic tokens).
@@ -60,6 +61,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		asJSON      bool
 		quiet       bool
 		rulesPath   string
+		rulePacks   []string
 		ignorePaths []string
 		noIgnore    bool
 		strict      bool
@@ -95,6 +97,16 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 			strict = true
 		case "--chill", "-chill":
 			chill = true
+		case "--rule-pack", "-rule-pack":
+			v, ok := needsValue("--rule-pack")
+			if !ok {
+				return exitUsage
+			}
+			if strings.TrimSpace(v) == "" || !hasInline && strings.HasPrefix(v, "-") {
+				fmt.Fprintln(stderr, "leakpeek: --rule-pack needs a non-empty pack name")
+				return exitUsage
+			}
+			rulePacks = append(rulePacks, v)
 		case "--rules", "-rules":
 			v, ok := needsValue("--rules")
 			if !ok {
@@ -148,14 +160,12 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	}
 
 	engine := detect.DefaultProfile(profile)
-	if rulesPath != "" {
-		custom, err := rules.LoadPath(rulesPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "leakpeek: %v\n", err)
-			return exitError
-		}
-		engine = engine.WithDetectors(custom...)
+	custom, err := rules.LoadExtras(rulesPath, rulePacks)
+	if err != nil {
+		fmt.Fprintf(stderr, "leakpeek: %v\n", err)
+		return exitError
 	}
+	engine = engine.WithDetectors(custom...)
 
 	var allowSet allow.Set
 	if !noIgnore {

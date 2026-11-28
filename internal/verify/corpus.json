@@ -1,0 +1,85 @@
+[
+  {
+    "detector": "aws-access-key",
+    "positives": [{"name": "documented AWS example", "text": "AKIAIOSFODNN7EXAMPLE"}],
+    "negatives": [{"name": "short AWS key", "text": "AKIAIOSFODNN7EXAMPL"}]
+  },
+  {
+    "detector": "openai-key",
+    "positives": [{"name": "synthetic project key", "text": "sk-proj-abcdefghijklmnopqrstuvwxyz012345"}],
+    "negatives": [{"name": "short sk string", "text": "sk-short-example"}]
+  },
+  {
+    "detector": "github-pat",
+    "positives": [{"name": "synthetic classic PAT", "text": "ghp_abcdefghijklmnopqrstuvwxyz0123456789"}],
+    "negatives": [{"name": "short PAT", "text": "ghp_short"}]
+  },
+  {
+    "detector": "slack-token",
+    "positives": [{"name": "synthetic bot token", "text": "xoxb-1234567890-abcdefghij"}],
+    "negatives": [{"name": "short bot token", "text": "xoxb-short"}]
+  },
+  {
+    "detector": "jwt",
+    "positives": [{"name": "synthetic JWT shape", "text": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.syntheticSignature"}],
+    "negatives": [{"name": "ordinary dotted identifier", "text": "service.component.version"}]
+  },
+  {
+    "detector": "private-key",
+    "positives": [{"name": "PEM header", "text": "-----BEGIN RSA PRIVATE KEY-----"}],
+    "negatives": [
+      {"name": "public key header", "text": "-----BEGIN PUBLIC KEY-----"},
+      {"name": "private-looking non-PEM header", "text": "BEGIN PRIVATE KEY"}
+    ]
+  },
+  {
+    "detector": "email",
+    "positives": [{"name": "reserved example address", "text": "jane@example.com"}],
+    "negatives": [{"name": "incomplete email", "text": "jane@example"}]
+  },
+  {
+    "detector": "ipv4",
+    "positives": [{"name": "documentation address", "text": "192.0.2.1"}],
+    "negatives": [{"name": "out of range octet", "text": "999.1.1.1"}]
+  },
+  {
+    "detector": "credit-card",
+    "positives": [{"name": "Visa test card", "text": "4111 1111 1111 1111"}],
+    "negatives": [
+      {"name": "invalid Luhn checksum", "text": "4111111111111112"},
+      {"name": "valid Luhn but too short for a card", "text": "79927398713"}
+    ]
+  },
+  {
+    "detector": "iban",
+    "positives": [{"name": "published GB example", "text": "GB82 WEST 1234 5698 7654 32"}],
+    "negatives": [{"name": "invalid mod-97 checksum", "text": "GB83 WEST 1234 5698 7654 32"}]
+  },
+  {
+    "detector": "ssn",
+    "positives": [{"name": "synthetic valid shape", "text": "123-45-6789"}],
+    "negatives": [
+      {"name": "unissued area", "text": "000-12-3456"},
+      {"name": "zero group", "text": "123-00-4567"},
+      {"name": "zero serial", "text": "123-45-0000"}
+    ]
+  },
+  {
+    "detector": "phone",
+    "positives": [{"name": "fictional NANP number", "text": "+1 202-555-0100"}],
+    "negatives": [
+      {"name": "bare numeric ID", "text": "12345678"},
+      {"name": "too few digits", "text": "12-34"}
+    ]
+  },
+  {
+    "detector": "high-entropy-token",
+    "positives": [{"name": "synthetic mixed token", "text": "wJalrXUtnFEMI7K8MDENGbPxRfiCYEXAMPLEKEY"}],
+    "negatives": [
+      {"name": "long English word run", "text": "thequickbrownfoxjumpsover"},
+      {"name": "short base64 English greeting", "text": "SGVsbG8gd29ybGQ="},
+      {"name": "base64-encoded English sentence", "text": "VGhpcyBpcyBhIHNpbXBsZSBzZW50ZW5jZSBvZiBFbmdsaXNoIHRleHQu"},
+      {"name": "low entropy mixed token", "text": "a1a1a1a1a1a1a1a1a1a1a1a1"}
+    ]
+  }
+]

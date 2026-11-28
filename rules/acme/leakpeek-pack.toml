@@ -1,0 +1,3 @@
+name = "acme"
+version = "1.0.0"
+description = "Example offline organization rules for internal hosts and project names."

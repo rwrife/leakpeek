@@ -15,16 +15,12 @@ func ownerSID() (*windows.SID, error) {
 	return u.User.Sid, nil
 }
 
-func privateDACL(dir bool) (string, error) {
-	sid, err := ownerSID()
-	if err != nil {
-		return "", err
-	}
+func privateDACL(sid *windows.SID, dir bool) string {
 	flags := ""
 	if dir {
 		flags = "OICI"
 	}
-	return "D:P(A;" + flags + ";FA;;;" + sid.String() + ")", nil
+	return "D:P(A;" + flags + ";FA;;;" + sid.String() + ")"
 }
 
 func secure(path string, dir bool) error {
@@ -32,11 +28,7 @@ func secure(path string, dir bool) error {
 	if err != nil {
 		return err
 	}
-	sddl, err := privateDACL(dir)
-	if err != nil {
-		return err
-	}
-	sd, err := windows.SecurityDescriptorFromString(sddl)
+	sd, err := windows.SecurityDescriptorFromString(privateDACL(sid, dir))
 	if err != nil {
 		return err
 	}
@@ -47,6 +39,14 @@ func secure(path string, dir bool) error {
 	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		sid, nil, acl, nil)
+}
+
+func matchesPrivateDACL(dacl *windows.SECURITY_DESCRIPTOR, sid *windows.SID, dir bool) (bool, error) {
+	want, err := windows.SecurityDescriptorFromString(privateDACL(sid, dir))
+	if err != nil {
+		return false, err
+	}
+	return dacl.String() == want.String(), nil
 }
 
 func checkPrivate(path string, _ os.FileInfo, dir bool) error {
@@ -72,11 +72,11 @@ func checkPrivate(path string, _ os.FileInfo, dir bool) error {
 	if err := dacl.SetControl(windows.SE_DACL_AUTO_INHERITED, 0); err != nil {
 		return err
 	}
-	want, err := privateDACL(dir)
+	private, err := matchesPrivateDACL(dacl, sid, dir)
 	if err != nil {
 		return err
 	}
-	if !owner.Equals(sid) || dacl.String() != want {
+	if !owner.Equals(sid) || !private {
 		return errors.New("diff snapshot requires an owner-only Windows ACL")
 	}
 	return nil

@@ -42,10 +42,11 @@ func DefaultDetectorsProfile(p EntropyProfile) []Detector {
 // validate hook lets a detector reject matches the regex can't cheaply
 // exclude (e.g. IPv4 octets > 255, or low-entropy generic tokens).
 type regexDetector struct {
-	name     string
-	kind     Kind
-	re       *regexp.Regexp
-	validate func(match string) bool // nil ⇒ accept every regex match
+	name            string
+	kind            Kind
+	re              *regexp.Regexp
+	validate        func(match string) bool // nil ⇒ accept every regex match
+	validateContext func(text string, start, end int) bool
 }
 
 func (d regexDetector) Name() string { return d.name }
@@ -60,6 +61,9 @@ func (d regexDetector) Find(text string) []Finding {
 	for _, loc := range locs {
 		m := text[loc[0]:loc[1]]
 		if d.validate != nil && !d.validate(m) {
+			continue
+		}
+		if d.validateContext != nil && !d.validateContext(text, loc[0], loc[1]) {
 			continue
 		}
 		out = append(out, Finding{Start: loc[0], End: loc[1], Match: m})
@@ -150,9 +154,14 @@ var ipv4 = regexDetector{
 var highEntropyToken = regexDetector{
 	name:     "high-entropy-token",
 	kind:     KindEntropy,
-	re:       regexp.MustCompile(`[A-Za-z0-9+/_-]{20,}={0,2}`),
+	re:       highEntropyTokenPattern,
 	validate: looksHighEntropy,
+	validateContext: func(text string, start, end int) bool {
+		return !isEncodedProse(text[start:end], text, start)
+	},
 }
+
+var highEntropyTokenPattern = regexp.MustCompile(`[A-Za-z0-9+/_-]{20,}={0,2}`)
 
 // entropyDetector builds the generic high-entropy catch-all with its gate
 // bound to a specific profile. The default detector (highEntropyToken) is the
@@ -165,8 +174,11 @@ func entropyDetector(p EntropyProfile) regexDetector {
 	return regexDetector{
 		name:     "high-entropy-token",
 		kind:     KindEntropy,
-		re:       highEntropyToken.re,
+		re:       highEntropyTokenPattern,
 		validate: p.accepts,
+		validateContext: func(text string, start, end int) bool {
+			return !isEncodedProse(text[start:end], text, start)
+		},
 	}
 }
 

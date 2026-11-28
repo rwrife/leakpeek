@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"encoding/base64"
 	"math"
 	"testing"
 )
@@ -72,4 +73,17 @@ func TestHighEntropyDetector_FindsGenericSecret(t *testing.T) {
 	if !containsMatch(got, secret) {
 		t.Errorf("high-entropy detector missed %q; got %v", secret, matches(got))
 	}
+}
+
+func TestHighEntropyDetectorIgnoresEncodedProseButPreservesSecretSignals(t *testing.T) {
+	const prose = "This is a simple sentence of English text."
+	encodedProse := base64.StdEncoding.EncodeToString([]byte(prose))
+	encodedSecret := base64.StdEncoding.EncodeToString([]byte("wJalrXUtnFEMI7K8MDENGbPxRfiCYEXAMPLEKEY"))
+	encodedEmail := base64.StdEncoding.EncodeToString([]byte("Please contact jane@example.com if you have any questions."))
+
+	d := detectorByName(t, "high-entropy-token")
+	assertFinds(t, d, encodedProse, nil)
+	assertFinds(t, d, "API_KEY="+encodedProse, []string{encodedProse})
+	assertFinds(t, d, encodedSecret, []string{encodedSecret})
+	assertFinds(t, d, encodedEmail, []string{encodedEmail})
 }

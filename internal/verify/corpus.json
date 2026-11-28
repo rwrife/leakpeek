@@ -78,6 +78,7 @@
     "negatives": [
       {"name": "long English word run", "text": "thequickbrownfoxjumpsover"},
       {"name": "short base64 English greeting", "text": "SGVsbG8gd29ybGQ="},
+      {"name": "base64-encoded English sentence", "text": "VGhpcyBpcyBhIHNpbXBsZSBzZW50ZW5jZSBvZiBFbmdsaXNoIHRleHQu"},
       {"name": "low entropy mixed token", "text": "a1a1a1a1a1a1a1a1a1a1a1a1"}
     ]
   }

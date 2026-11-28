@@ -253,6 +253,9 @@ unissued/zero SSN groups, unformatted numeric IDs and short phone numbers,
 long English word runs, a short base64 English greeting, and low-entropy
 mixed-character tokens. These are bounded regression checks, not a guarantee
 that all Luhn-valid IDs or all base64-encoded prose will be ignored.
+Long base64 tokens that decode to ordinary English prose are ignored when the
+decoded text contains no detector finding and the token is not assigned to a
+credential-like field. Other base64 blobs remain subject to the entropy check.
 
 ### Self-test custom rules
 

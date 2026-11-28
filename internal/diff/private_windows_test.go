@@ -8,6 +8,35 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestPrivateDACLCanonicalizesWellKnownSID(t *testing.T) {
+	sid, err := windows.StringToSid("S-1-5-18")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []bool{false, true} {
+		flags := ""
+		if dir {
+			flags = "OICI"
+		}
+		aliased, err := windows.SecurityDescriptorFromString("D:P(A;" + flags + ";FA;;;SY)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ok, err := matchesPrivateDACL(aliased, sid, dir)
+		if err != nil || !ok {
+			t.Fatalf("equivalent owner ACL rejected: %v", err)
+		}
+		shared, err := windows.SecurityDescriptorFromString("D:P(A;" + flags + ";FA;;;SY)(A;;FR;;;WD)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ok, err = matchesPrivateDACL(shared, sid, dir)
+		if err != nil || ok {
+			t.Fatalf("shared ACL accepted: %v", err)
+		}
+	}
+}
+
 func TestSnapshotRefusesUnsafeACL(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "private")
 	if err := Save(dir, "secret", time.Now()); err != nil {

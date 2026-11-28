@@ -3,9 +3,20 @@ package notify
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func testCommand(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name+".exe")
+	if err := os.WriteFile(path, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func TestNotifyAlwaysRingsBell(t *testing.T) {
 	// A toaster with no candidates still must ring the bell and report no
@@ -30,13 +41,13 @@ func TestNotifyNilBellDoesNotPanic(t *testing.T) {
 }
 
 func TestNotifyReportsDesktopWhenRunSucceeds(t *testing.T) {
-	// Use a candidate whose binary certainly exists on a POSIX box so
-	// LookPath resolves and our fake run reports success.
+	// LookPath checks a test-owned executable; run remains a fake.
+	commandPath := testCommand(t, "success")
 	var gotName string
 	var gotTitle, gotBody string
 	tr := &toaster{
 		goos:       "linux",
-		candidates: []command{{"sh", []string{"{title}", "{body}"}}},
+		candidates: []command{{commandPath, []string{"{title}", "{body}"}}},
 		run: func(c command, title, body string) error {
 			gotName = c.name
 			gotTitle, gotBody = title, body
@@ -47,8 +58,8 @@ func TestNotifyReportsDesktopWhenRunSucceeds(t *testing.T) {
 	if !tr.Notify("Leak!", "3 secrets", &bell) {
 		t.Fatal("desktop = false, want true when run succeeds")
 	}
-	if gotName != "sh" {
-		t.Errorf("ran %q, want sh", gotName)
+	if gotName != commandPath {
+		t.Errorf("ran %q, want %q", gotName, commandPath)
 	}
 	if gotTitle != "Leak!" || gotBody != "3 secrets" {
 		t.Errorf("run got (%q,%q), want (Leak!,3 secrets)", gotTitle, gotBody)
@@ -59,15 +70,16 @@ func TestNotifyFallsThroughOnFailure(t *testing.T) {
 	// First candidate exists but fails; second exists and succeeds. Notify
 	// must try the second and report success.
 	var calls []string
+	first, second := testCommand(t, "first"), testCommand(t, "second")
 	tr := &toaster{
 		goos: "linux",
 		candidates: []command{
-			{"sh", nil},  // exists, will fail
-			{"env", nil}, // exists, will succeed
+			{first, nil},
+			{second, nil},
 		},
 		run: func(c command, _, _ string) error {
 			calls = append(calls, c.name)
-			if c.name == "sh" {
+			if c.name == first {
 				return errors.New("headless")
 			}
 			return nil
@@ -77,8 +89,8 @@ func TestNotifyFallsThroughOnFailure(t *testing.T) {
 	if !tr.Notify("t", "b", &bell) {
 		t.Fatal("desktop = false, want true after fallthrough")
 	}
-	if len(calls) != 2 || calls[0] != "sh" || calls[1] != "env" {
-		t.Errorf("call order = %v, want [sh env]", calls)
+	if len(calls) != 2 || calls[0] != first || calls[1] != second {
+		t.Errorf("call order = %v, want [%s %s]", calls, first, second)
 	}
 }
 
